@@ -332,4 +332,60 @@ def evaluar_entrada_25(
                 {
                     "mercado": "-2.5 goles",
                     "cuota": cuota_under_25,
-                    "prob_modelo": round(p_under * 100
+                    "prob_modelo": round(p_under * 100, 1),
+                    "prob_implicita": round(imp_under * 100, 1),
+                    "edge": round(edge_under * 100, 1),
+                    "ev": round(ev_under, 3),
+                }
+            )
+
+    if not opciones:
+        return {
+            "decision": "NO APOSTAR",
+            "motivo": "Ningún mercado supera el umbral mínimo de ventaja o cuota.",
+            "xg_total": probs["xg_total"],
+            "p_over_25": round(p_over * 100, 1),
+            "p_under_25": round(p_under * 100, 1),
+            "desglose": desglose,
+        }
+
+    mejor = max(opciones, key=lambda x: x["ev"])
+    return {
+        "decision": "APOSTAR",
+        "mercado": mejor["mercado"],
+        "cuota": mejor["cuota"],
+        "prob_modelo": mejor["prob_modelo"],
+        "prob_implicita": mejor["prob_implicita"],
+        "edge": mejor["edge"],
+        "ev": mejor["ev"],
+        "xg_total": probs["xg_total"],
+        "p_over_25": round(p_over * 100, 1),
+        "p_under_25": round(p_under * 100, 1),
+        "desglose": desglose,
+    }
+
+
+def renderizar_resultado(resultado: dict, partido_label: str) -> None:
+    """Muestra el veredicto directo (+2.5 goles, -2.5 goles o NO APOSTAR) y métricas."""
+    st.markdown(f"**Partido:** {partido_label}")
+
+    r1, r2, r3 = st.columns(3)
+    r1.metric("Goles esperados (xG)", f"{resultado['xg_total']:.2f}")
+    r2.metric("Prob. +2.5 goles", f"{resultado['p_over_25']:.1f}%")
+    r3.metric("Prob. -2.5 goles", f"{resultado['p_under_25']:.1f}%")
+
+    if resultado["decision"] == "APOSTAR":
+        st.success(
+            f"### ✅ APOSTAR → {resultado['mercado'].upper()}\n"
+            f"**Cuota:** `{resultado['cuota']:.2f}` | "
+            f"**Ventaja:** `+{resultado['edge']:.1f}%` | "
+            f"**EV:** `{resultado['ev']:+.3f}`"
+        )
+    else:
+        st.warning(f"### ⛔ NO APOSTAR\n{resultado['motivo']}")
+
+    if resultado.get("desglose"):
+        st.dataframe(resultado["desglose"], width="stretch", hide_index=True)
+
+
+st.title("⚽ Detector de
