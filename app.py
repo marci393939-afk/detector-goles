@@ -1,424 +1,406 @@
 import math
-import os
 import re
-from datetime import datetime
-from pathlib import Path
+from io import BytesIO
 
-import pandas as pd
+import numpy as np
+from PIL import Image, ImageEnhance, ImageOps
 import pytesseract
 import streamlit as st
-from PIL import Image, ImageOps
+
 
 st.set_page_config(
-    page_title="Detector +2.5 / -2.5 Goles",
-    layout="wide",
+    page_title="Detector de Goles (+2.5 / -2.5)",
+    page_icon="⚽",
+    layout="centered",
 )
 
-BASE_DIR = Path(__file__).resolve().parent
-HISTORY_FILE = BASE_DIR / "historial_pronosticos.csv"
+PALABRAS_RUIDO = {
+    "TIEMPO",
+    "STREAM",
+    "ANUNCIO",
+    "CUOTAS",
+    "H2H",
+    "CLASIFICACION",
+    "ALINEACIONES",
+    "ESTAD",
+    "ESTADIS",
+    "DIRECTO",
+    "PREPARTIDO",
+    "PROXIMO GOL",
+    "MAS DE/MENOS DE",
+    "MAS DE",
+    "MENOS DE",
+    "AMBOS",
+    "FLASHSCORE",
+    "PARTIDO",
+    "RESUMEN",
+    "ESTADISTICAS",
+    "BET>",
+    "BET365",
+    "SPORTIUM",
+    "1XBET",
+    "APUESTA EN",
+    "DISPONIBLES",
+}
 
-# Rutas habituales de Tesseract en Windows (en Linux/Streamlit Cloud se ignora y usa el binario del sistema)
-CANDIDATE_TESSERACT = [
-    Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe"),
-    Path(r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe"),
-    Path.home() / r"AppData\Local\Programs\Tesseract-OCR\tesseract.exe",
-]
-for candidate in CANDIDATE_TESSERACT:
-    if candidate.exists():
-        pytesseract.pytesseract.tesseract_cmd = str(candidate)
-        break
+
+def preparar_imagen_ocr(imagen: Image.Image) -> Image.Image:
+    """Mejora contraste y escala la imagen para facilitar la lectura de Tesseract."""
+    img = imagen.convert("RGB")
+    w, h = img.size
+    if max(w, h) < 1600:
+        escala = 1600 / max(w, h)
+        img = img.resize((int(w * escala), int(h * escala)), Image.Resampling.LANCZOS)
+
+    gris = ImageOps.grayscale(img)
+    gris = ImageEnhance.Contrast(gris).enhance(1.5)
+    gris = ImageEnhance.Sharpness(gris).enhance(1.4)
+    return gris
+
+
+@st.cache_data(show_spinner=False)
+def ejecutar_ocr_bytes(img_bytes: bytes, psm: int = 6) -> str:
+    """Ejecuta Tesseract OCR sobre los bytes de la imagen."""
+    imagen = Image.open(BytesIO(img_bytes))
+    procesada = preparar_imagen_ocr(imagen)
+    config = f"--oem 3 --psm {psm}"
+    return pytesseract.image_to_string(procesada, lang="spa+eng", config=config)
+
+
+def limpiar_lineas_ocr(texto_ocr: str) -> list[str]:
+    """Limpia el texto devuelto por Tesseract y descarta ruido de interfaz."""
+    lineas_limpias = []
+    for linea in texto_ocr.splitlines():
+        limpia = linea.strip()
+        if not limpia:
+            continue
+
+        # Ignora marcadores tipo 0-0, relojes tipo 7:06 o fechas tipo 21.11.2026
+        if re.fullmatch(r"\d{1,2}[:.\-]\d{1,2}(?:[:.\-]\d{2,4})?", limpia):
+            continue
+
+        mayus = limpia.upper()
+        if any(palabra in mayus for palabra in PALABRAS_RUIDO):
+            continue
+
+        letras = sum(c.isalpha() for c in limpia)
+        if letras < 2:
+            continue
+
+        lineas_limpias.append(limpia)
+
+    return lineas_limpias
+
+
+def extraer_cuotas_winamax(texto_ocr: str) -> dict[str, float | None]:
+    """Busca específicamente la fila de WINAMAX y extrae las cuotas 1, X y 2."""
+    for linea in texto_ocr.splitlines():
+        if "WINAMAX" in linea.upper():
+            normalizada = linea.replace(",", ".")
+            candidatos = re.findall(r"\b\d+\.\d{2}\b", normalizada)
+            cuotas = [float(val) for val in candidatos if 1.05 <= float(val) <= 25.0]
+            if len(cuotas) >= 3:
+                return {
+                    "cuota_1": cuotas[0],
+                    "cuota_x": cuotas[1],
+                    "cuota_2": cuotas[2],
+                }
+            if len(cuotas) == 1:
+                return {
+                    "cuota_1": cuotas[0],
+                    "cuota_x": None,
+                    "cuota_2": None,
+                }
+
+    return {"cuota_1": None, "cuota_x": None, "cuota_2": None}
+
+
+def sugerir_equipos_candidatos(texto_ocr: str) -> tuple[str, str]:
+    """Sugiere equipo local y visitante evitando palabras de interfaz o símbolos."""
+    lineas = limpiar_lineas_ocr(texto_ocr)
+    equipos = []
+    for linea in lineas:
+        if "WINAMAX" in linea.upper():
+            continue
+        if re.search(r"[|{}~<>\\]", linea):
+            continue
+        if re.search(r"\d", linea):
+            continue
+        if 2 <= len(linea) <= 35:
+            equipos.append(linea)
+
+    local = equipos[0] if len(equipos) >= 1 else ""
+    visitante = equipos[1] if len(equipos) >= 2 else ""
+    return local, visitante
+
+
+def calcular_xg_moderado(
+    gf_local_10: float,
+    gc_local_10: float,
+    gf_vis_10: float,
+    gc_vis_10: float,
+    goles_h2h_prom: float | None = None,
+    peso_h2h: float = 0.20,
+) -> tuple[float, float]:
+    """
+    Calcula goles esperados moderando picos extremos con medias de 10 partidos
+    y un peso opcional de enfrentamientos directos (H2H).
+    """
+    gf_l = min(max(gf_local_10, 0.2), 3.8)
+    gc_l = min(max(gc_local_10, 0.2), 3.8)
+    gf_v = min(max(gf_vis_10, 0.2), 3.8)
+    gc_v = min(max(gc_vis_10, 0.2), 3.8)
+
+    xg_local = (gf_l + gc_v) / 2.0
+    xg_visitante = (gf_v + gc_l) / 2.0
+
+    if goles_h2h_prom is not None and goles_h2h_prom > 0:
+        h2h_mod = min(max(goles_h2h_prom, 0.4), 5.5)
+        total_base = xg_local + xg_visitante
+        total_ajustado = ((1.0 - peso_h2h) * total_base) + (peso_h2h * h2h_mod)
+        if total_base > 0:
+            factor = total_ajustado / total_base
+            xg_local *= factor
+            xg_visitante *= factor
+
+    return round(max(0.15, xg_local), 2), round(max(0.15, xg_visitante), 2)
 
 
 def poisson_pmf(k: int, lam: float) -> float:
-    if lam <= 0:
-        return 1.0 if k == 0 else 0.0
-    return math.exp(-lam + k * math.log(lam) - math.lgamma(k + 1))
+    return (math.exp(-lam) * (lam ** k)) / math.factorial(k)
 
 
-def poisson_under_25(lam: float) -> float:
-    p_under = poisson_pmf(0, lam) + poisson_pmf(1, lam) + poisson_pmf(2, lam)
-    return min(0.99, max(0.01, p_under))
+def probs_over_under_25(xg_local: float, xg_visitante: float) -> dict[str, float]:
+    """Calcula P(-2.5) y P(+2.5) sumando probabilidades de goles totales 0, 1 y 2."""
+    total_xg = max(0.05, xg_local + xg_visitante)
+    p_0 = poisson_pmf(0, total_xg)
+    p_1 = poisson_pmf(1, total_xg)
+    p_2 = poisson_pmf(2, total_xg)
 
-
-def solve_lambda_from_over_prob(target_over: float) -> float:
-    clamped = min(0.95, max(0.05, target_over))
-    lo, hi = 0.25, 6.50
-    for _ in range(45):
-        mid = (lo + hi) / 2.0
-        if (1.0 - poisson_under_25(mid)) < clamped:
-            lo = mid
-        else:
-            hi = mid
-    return (lo + hi) / 2.0
-
-
-def ocr_image_auto(img: Image.Image) -> str:
-    rgb = img.convert("RGB")
-    gray = ImageOps.grayscale(rgb)
-
-    # Si el fondo es oscuro (típico de casas de apuestas y webs de estadísticas), invertimos
-    small = gray.resize((64, 64))
-    avg_sample = sum(small.getdata()) / (64 * 64)
-    if avg_sample < 115:
-        gray = ImageOps.invert(gray)
-
-    gray = ImageOps.autocontrast(gray)
-    w, h = gray.size
-    if w < 1600:
-        gray = gray.resize((w * 2, h * 2), Image.Resampling.LANCZOS)
-
-    text_block = pytesseract.image_to_string(gray, config="--psm 6")
-    text_sparse = pytesseract.image_to_string(gray, config="--psm 11")
-    return f"{text_block}\n{text_sparse}".strip()
-
-
-def _parse_decimal_odds_from_chunk(chunk: str) -> list[float]:
-    if not chunk:
-        return []
-    # Evita fechas tipo 21.11.2026 o horas tipo 13:30
-    cleaned = re.sub(r"\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b", " ", chunk)
-    cleaned = re.sub(r"\b\d{1,2}:\d{2}\b", " ", cleaned)
-
-    matches = re.findall(r"(?<![A-Za-z0-9./-])\d{1,2}[.,]\d{2}(?![A-Za-z0-9./-])", cleaned)
-    odds = []
-    seen = set()
-    for m in matches:
-        val = float(m.replace(",", "."))
-        if 1.01 <= val <= 50.0:
-            key = f"{val:.2f}"
-            if key not in seen:
-                seen.add(key)
-                odds.append(val)
-    return odds
-
-
-def extract_winamax_odds(text: str) -> list[float]:
-    """Extrae exclusivamente las cuotas de Winamax."""
-    if not text:
-        return []
-
-    winamax_pattern = re.compile(r"\b(winamax|wlnamax|w1namax|win\s*a\s*max)\b", re.IGNORECASE)
-    other_bookies_pattern = re.compile(
-        r"\b(bet365|sportium|codere|william\s*hill|bwin|betfair|888sport|marathonbet|luckia|kirolbet|paf|versus|zebet|unibet)\b",
-        re.IGNORECASE,
-    )
-
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-
-    for idx, line in enumerate(lines):
-        if winamax_pattern.search(line):
-            collected: list[float] = []
-            for follow in lines[idx : idx + 10]:
-                if follow != line and other_bookies_pattern.search(follow):
-                    break
-                collected.extend(_parse_decimal_odds_from_chunk(follow))
-                dedup = []
-                seen = set()
-                for val in collected:
-                    key = f"{val:.2f}"
-                    if key not in seen:
-                        seen.add(key)
-                        dedup.append(val)
-                if len(dedup) >= 3:
-                    return dedup[:5]
-
-    return []
-
-
-def extract_teams_from_text(text: str) -> tuple[str, str]:
-    if not text:
-        return "", ""
-
-    known_teams = [
-        ("Manchester City", [r"\bmanchester\s+city\b", r"\bciudad\s+de\s+manchester\b"]),
-        ("Fulham", [r"\bfulham\b"]),
-    ]
-    found_known = []
-    for canonical, patterns in known_teams:
-        if any(re.search(p, text, flags=re.IGNORECASE) for p in patterns):
-            found_known.append(canonical)
-    if len(found_known) >= 2:
-        return found_known[0], found_known[1]
-
-    ignore_words = {
-        "winamax", "flashscore", "besoccer", "cuotas", "resultado", "final",
-        "goles", "mas", "más", "menos", "empate", "local", "visitante",
-        "hoy", "directo", "previa", "estadisticas", "estadísticas", "apuestas",
-        "1x2", "2.5", "+2.5", "-2.5", "over", "under", "liga", "copa",
-        "bet365", "sportium", "codere", "bwin", "betfair", "stream", "alineaciones",
-        "clasificacion", "clasificación", "noticias", "video", "vídeo", "h2h",
-        "futbol", "fútbol", "inglaterra", "espana", "españa", "premier", "league",
-        "jornada", "partido", "resumen", "videoprevia", "anuncio", "mostrar",
-        "integra", "íntegra", "nueva", "ventana", "handicap", "asiatico", "asiático",
-        "ambos", "equipos", "marcaran", "marcarán", "hacer", "una", "apuesta",
-        "categoria", "categoría", "ciudad", "vivo", "uve", "city"
-    }
-
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-
-    candidates = []
-    for line in lines:
-        if any(ch in line for ch in (">", "/", ":", "@", "|", "(", ")", "[", "]")):
-            continue
-        clean = re.sub(r"\b\d{1,2}[.,]\d{2}\b", " ", line)
-        clean = re.sub(r"[^A-Za-zÀ-ÿ\s]", " ", clean)
-        clean = re.sub(r"\s+", " ", clean).strip()
-        low = clean.lower()
-        words = low.split()
-        if not clean or len(clean) < 4 or len(words) < 1 or len(words) > 4:
-            continue
-        if any(w in ignore_words for w in words):
-            continue
-        if clean not in candidates:
-            candidates.append(clean)
-
-    if len(candidates) >= 2:
-        return candidates[0], candidates[1]
-    if len(candidates) == 1:
-        return candidates[0], ""
-    return "", ""
-
-
-def calculate_model(
-    o1: float | None,
-    ox: float | None,
-    o2: float | None,
-    o_over: float | None,
-    o_under: float | None,
-    live_score: str,
-) -> dict | None:
-    has_1x2 = all(v is not None and v > 1.0 for v in (o1, ox, o2))
-    has_line = all(v is not None and v > 1.0 for v in (o_over, o_under))
-
-    if not has_1x2 and not has_line:
-        return None
-
-    if has_line:
-        inv_over = 1.0 / o_over
-        inv_under = 1.0 / o_under
-        total = inv_over + inv_under
-        p_over = inv_over / total
-        p_under = inv_under / total
-        lam = solve_lambda_from_over_prob(p_over)
-    else:
-        i1, ix, i2 = 1.0 / o1, 1.0 / ox, 1.0 / o2
-        tot = i1 + ix + i2
-        p1, px, p2 = i1 / tot, ix / tot, i2 / tot
-        balance = 1.0 - abs(p1 - p2) * 0.45 - px * 0.35
-        lam = min(4.20, max(1.25, 2.35 + (balance - 0.55) * 1.40))
-
-        m_score = re.search(r"(\d+)\s*[-–]\s*(\d+)", live_score or "")
-        if m_score:
-            goals_now = int(m_score.group(1)) + int(m_score.group(2))
-            rem = max(0, 3 - goals_now)
-            lam = max(lam, goals_now + 0.40) if goals_now >= 3 else (goals_now + rem * 0.58)
-
-        p_under = poisson_under_25(lam)
-        p_over = 1.0 - p_under
-
-    is_over = p_over >= p_under
-    verdict = "+2.5 GOLES" if is_over else "-2.5 GOLES"
-    chosen_prob = p_over if is_over else p_under
-    fair_odd = (1.0 / chosen_prob) if chosen_prob > 0 else 0.0
+    p_under_25 = min(0.99, max(0.01, p_0 + p_1 + p_2))
+    p_over_25 = 1.0 - p_under_25
 
     return {
-        "verdict": verdict,
-        "p_over": p_over,
-        "p_under": p_under,
-        "lambda": lam,
-        "fair_odd": fair_odd,
+        "xg_total": round(total_xg, 2),
+        "p_under_25": p_under_25,
+        "p_over_25": p_over_25,
     }
 
 
-def save_to_history(row: dict) -> None:
-    df_new = pd.DataFrame([row])
-    if HISTORY_FILE.exists():
-        df_old = pd.read_csv(HISTORY_FILE)
-        df_all = pd.concat([df_new, df_old], ignore_index=True)
-    else:
-        df_all = df_new
-    df_all.to_csv(HISTORY_FILE, index=False)
+def evaluar_entrada_25(
+    xg_local: float,
+    xg_visitante: float,
+    cuota_over_25: float | None = None,
+    cuota_under_25: float | None = None,
+    min_edge: float = 0.07,
+    min_cuota_over: float = 1.60,
+    min_cuota_under: float = 1.45,
+) -> dict:
+    """Evalúa +2.5 y -2.5 goles exigiendo ventaja mínima sobre la cuota."""
+    probs = probs_over_under_25(xg_local, xg_visitante)
+    p_over = probs["p_over_25"]
+    p_under = probs["p_under_25"]
 
+    opciones = []
 
-def apply_ocr_to_state(img: Image.Image) -> None:
-    raw_text = ocr_image_auto(img)
-    st.session_state["ocr_text"] = raw_text
-    h_det, a_det = extract_teams_from_text(raw_text)
-    odds_winamax = extract_winamax_odds(raw_text)
-
-    st.session_state["home_team"] = h_det
-    st.session_state["away_team"] = a_det
-    st.session_state["odd_1"] = float(odds_winamax[0]) if len(odds_winamax) >= 1 else 0.0
-    st.session_state["odd_x"] = float(odds_winamax[1]) if len(odds_winamax) >= 2 else 0.0
-    st.session_state["odd_2"] = float(odds_winamax[2]) if len(odds_winamax) >= 3 else 0.0
-    st.session_state["odd_over"] = float(odds_winamax[3]) if len(odds_winamax) >= 5 else 0.0
-    st.session_state["odd_under"] = float(odds_winamax[4]) if len(odds_winamax) >= 5 else 0.0
-    st.session_state["winamax_found"] = len(odds_winamax) >= 3
-    st.session_state["ocr_error"] = ""
-
-
-def process_new_capture(img: Image.Image, label: str, force: bool = False) -> None:
-    if not force and st.session_state.get("last_processed_label") == label:
-        return
-    st.session_state["last_processed_label"] = label
-    try:
-        apply_ocr_to_state(img)
-    except Exception as exc:
-        st.session_state["ocr_error"] = str(exc)
-
-
-st.title("Detector 1X2 a +2.5 / -2.5 Goles")
-st.caption("Detección automática de cuotas de Winamax desde la captura + cálculo Poisson.")
-
-col_left, col_right = st.columns([1.35, 1.0], gap="large")
-
-with col_left:
-    st.subheader("1. Cargar captura del partido")
-    source_mode = st.radio(
-        "Origen de la captura",
-        ["Subir archivo", "Última imagen de una carpeta"],
-        horizontal=True,
-    )
-
-    loaded_img: Image.Image | None = None
-    loaded_label = ""
-
-    if source_mode == "Subir archivo":
-        uploaded = st.file_uploader(
-            "Selecciona tu captura (PNG, JPG, WEBP)",
-            type=["png", "jpg", "jpeg", "webp"],
-        )
-        if uploaded is not None:
-            loaded_img = Image.open(uploaded)
-            loaded_label = f"{uploaded.name}_{uploaded.size}"
-    else:
-        default_dir = str(Path.home() / "Pictures")
-        watch_dir = st.text_input("Ruta de la carpeta de capturas", value=default_dir)
-        if os.path.isdir(watch_dir):
-            imgs = [
-                p for p in Path(watch_dir).iterdir()
-                if p.is_file() and p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
-            ]
-            imgs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-            if imgs:
-                latest = imgs[0]
-                st.info(f"Imagen más reciente: **{latest.name}**")
-                loaded_img = Image.open(latest)
-                loaded_label = f"{latest.name}_{latest.stat().st_mtime}"
-            else:
-                st.warning("No se encontraron imágenes en esa carpeta.")
-        else:
-            st.warning("La carpeta indicada no existe.")
-
-    if loaded_img is not None:
-        process_new_capture(loaded_img, loaded_label)
-        st.image(
-            loaded_img,
-            caption=f"Captura analizada ({loaded_img.width}x{loaded_img.height} px)",
-            use_container_width=True,
-        )
-        if st.button("Reescanear captura automáticamente"):
-            process_new_capture(loaded_img, loaded_label, force=True)
-            st.rerun()
-        if st.session_state.get("winamax_found") is False:
-            st.warning(
-                "No se detectaron cuotas de Winamax en esta captura. "
-                "Las cuotas se han dejado en 0.00 para no usar las de otras casas."
+    if cuota_over_25 and cuota_over_25 > 1.0:
+        imp_over = 1.0 / cuota_over_25
+        edge_over = p_over - imp_over
+        ev_over = (p_over * cuota_over_25) - 1.0
+        if edge_over >= min_edge and cuota_over_25 >= min_cuota_over:
+            opciones.append(
+                {
+                    "mercado": "+2.5 goles",
+                    "cuota": cuota_over_25,
+                    "prob_modelo": round(p_over * 100, 1),
+                    "prob_implicita": round(imp_over * 100, 1),
+                    "edge": round(edge_over * 100, 1),
+                    "ev": round(ev_over, 3),
+                }
             )
 
-    if st.session_state.get("ocr_error"):
-        st.error(f"Error al ejecutar Tesseract OCR: {st.session_state['ocr_error']}")
+    if cuota_under_25 and cuota_under_25 > 1.0:
+        imp_under = 1.0 / cuota_under_25
+        edge_under = p_under - imp_under
+        ev_under = (p_under * cuota_under_25) - 1.0
+        if edge_under >= min_edge and cuota_under_25 >= min_cuota_under:
+            opciones.append(
+                {
+                    "mercado": "-2.5 goles",
+                    "cuota": cuota_under_25,
+                    "prob_modelo": round(p_under * 100, 1),
+                    "prob_implicita": round(imp_under * 100, 1),
+                    "edge": round(edge_under * 100, 1),
+                    "ev": round(ev_under, 3),
+                }
+            )
+
+    if not opciones:
+        return {
+            "decision": "NO APOSTAR",
+            "motivo": "Sin ventaja mínima suficiente o cuota fuera del filtro de seguridad.",
+            "xg_total": probs["xg_total"],
+            "p_over_25": round(p_over * 100, 1),
+            "p_under_25": round(p_under * 100, 1),
+        }
+
+    mejor = max(opciones, key=lambda x: x["ev"])
+    return {
+        "decision": "APOSTAR",
+        "mercado": mejor["mercado"],
+        "cuota": mejor["cuota"],
+        "prob_modelo": mejor["prob_modelo"],
+        "prob_im
+"prob_implicita": mejor["prob_implicita"],
+        "edge": mejor["edge"],
+        "ev": mejor["ev"],
+        "xg_total": probs["xg_total"],
+        "p_over_25": round(p_over * 100, 1),
+        "p_under_25": round(p_under * 100, 1),
+    }
+
+
+st.title("⚽ Detector de Goles (+2.5 / -2.5)")
+st.caption("Lectura OCR de capturas, proyección de goles y filtro de valor para Winamax.")
+
+# 1. Captura y OCR
+st.subheader("1. Captura de pantalla")
+archivo = st.file_uploader(
+    "Sube una captura recortada de equipos o cuotas de Winamax",
+    type=["png", "jpg", "jpeg", "webp"],
+)
+
+with st.expander("Ajustes de lectura y filtros"):
+    psm = st.selectbox("Modo de segmentación OCR (PSM)", options=[6, 4, 11, 3], index=0)
+    min_edge_pct = st.slider(
+        "Ventaja mínima sobre cuota (%)", min_value=2.0, max_value=20.0, value=7.0, step=0.5
+    )
+    min_cuota_over = st.slider(
+        "Cuota mínima en +2.5 goles", min_value=1.30, max_value=2.50, value=1.60, step=0.05
+    )
+
+texto_ocr = ""
+local_sugerido = ""
+visitante_sugerido = ""
+cuotas_winamax = {"cuota_1": None, "cuota_x": None, "cuota_2": None}
+
+if archivo is not None:
+    img_bytes = archivo.getvalue()
+    imagen_original = Image.open(BytesIO(img_bytes))
+    st.image(
+        imagen_original,
+        caption=f"Captura cargada ({imagen_original.width}x{imagen_original.height} px)",
+        use_container_width=True,
+    )
+
+    if st.button("Reescanear captura automáticamente"):
+        st.cache_data.clear()
+
+    try:
+        texto_ocr = ejecutar_ocr_bytes(img_bytes, psm=psm)
+        local_sugerido, visitante_sugerido = sugerir_equipos_candidatos(texto_ocr)
+        cuotas_winamax = extraer_cuotas_winamax(texto_ocr)
+    except Exception as exc:
+        st.error(f"Error al ejecutar OCR: {exc}")
 
     with st.expander("Ver texto detectado automáticamente en la captura"):
-        st.text(st.session_state.get("ocr_text", "(Sin texto leído aún)"))
+        st.text(texto_ocr if texto_ocr.strip() else "No se detectó texto.")
 
-    st.subheader("2. Partido y cuotas de Winamax")
-    c1, c2, c3 = st.columns(3)
-    home_team = c1.text_input("Equipo Local", value=st.session_state.get("home_team", ""))
-    away_team = c2.text_input("Equipo Visitante", value=st.session_state.get("away_team", ""))
-    live_score = c3.text_input(
-        "Marcador en vivo (opcional)",
-        value=st.session_state.get("live_score", ""),
-        placeholder="Ej. 0-0",
-    )
+# 2. Equipos y cuotas (siempre editables)
+st.subheader("2. Partido y cuotas (+2.5 / -2.5)")
+col1, col2 = st.columns(2)
+with col1:
+    equipo_local = st.text_input("Equipo Local", value=local_sugerido)
+with col2:
+    equipo_visitante = st.text_input("Equipo Visitante", value=visitante_sugerido)
 
-    q1, qx, q2 = st.columns(3)
-    odd_1 = q1.number_input(
-        "Cuota 1 (Winamax)",
-        min_value=0.0,
-        step=0.01,
-        format="%.2f",
-        value=float(st.session_state.get("odd_1", 0.0)),
-    )
-    odd_x = qx.number_input(
-        "Cuota X (Winamax)",
-        min_value=0.0,
-        step=0.01,
-        format="%.2f",
-        value=float(st.session_state.get("odd_x", 0.0)),
-    )
-    odd_2 = q2.number_input(
-        "Cuota 2 (Winamax)",
-        min_value=0.0,
-        step=0.01,
-        format="%.2f",
-        value=float(st.session_state.get("odd_2", 0.0)),
+if any(v is not None for v in cuotas_winamax.values()):
+    st.info(
+        f"Winamax detectado en captura (1 / X / 2): "
+        f"{cuotas_winamax['cuota_1'] or '-'} / {cuotas_winamax['cuota_x'] or '-'} / {cuotas_winamax['cuota_2'] or '-'}"
     )
 
-    qo, qu = st.columns(2)
-    odd_over = qo.number_input(
-        "Cuota +2.5 Goles (Winamax, opcional)",
-        min_value=0.0,
+c_over, c_under = st.columns(2)
+with c_over:
+    usar_over = st.checkbox("Evaluar +2.5 goles", value=True)
+    cuota_over_25 = st.number_input(
+        "Cuota +2.5 (Winamax)",
+        min_value=1.01,
+        max_value=20.00,
+        value=1.85,
         step=0.01,
         format="%.2f",
-        value=float(st.session_state.get("odd_over", 0.0)),
+        disabled=not usar_over,
     )
-    odd_under = qu.number_input(
-        "Cuota -2.5 Goles (Winamax, opcional)",
-        min_value=0.0,
+with c_under:
+    usar_under = st.checkbox("Evaluar -2.5 goles", value=True)
+    cuota_under_25 = st.number_input(
+        "Cuota -2.5 (Winamax)",
+        min_value=1.01,
+        max_value=20.00,
+        value=1.95,
         step=0.01,
         format="%.2f",
-        value=float(st.session_state.get("odd_under", 0.0)),
+        disabled=not usar_under,
     )
 
-with col_right:
-    st.subheader("3. Veredicto Final")
-    res = calculate_model(
-        odd_1 if odd_1 > 1 else None,
-        odd_x if odd_x > 1 else None,
-        odd_2 if odd_2 > 1 else None,
-        odd_over if odd_over > 1 else None,
-        odd_under if odd_under > 1 else None,
-        live_score,
+# 3. Medias de 10 partidos y H2H
+st.subheader("3. Promedios (últimos 10 partidos y H2H)")
+m1, m2 = st.columns(2)
+with m1:
+    gf_local_10 = st.number_input(
+        "Goles a favor Local (prom. 10)", min_value=0.0, max_value=6.0, value=1.40, step=0.05
+    )
+    gc_local_10 = st.number_input(
+        "Goles en contra Local (prom. 10)", min_value=0.0, max_value=6.0, value=1.10, step=0.05
+    )
+with m2:
+    gf_vis_10 = st.number_input(
+        "Goles a favor Visitante (prom. 10)", min_value=0.0, max_value=6.0, value=1.20, step=0.05
+    )
+    gc_vis_10 = st.number_input(
+        "Goles en contra Visitante (prom. 10)", min_value=0.0, max_value=6.0, value=1.20, step=0.05
     )
 
-    if res is None:
-        st.info("Sube una captura con cuotas de **Winamax** (**1 / X / 2** o **+2.5 / -2.5**) para calcular el veredicto.")
+usar_h2h = st.checkbox("Incluir promedio de goles en H2H", value=False)
+goles_h2h_prom = None
+if usar_h2h:
+    goles_h2h_prom = st.number_input(
+        "Promedio goles totales H2H", min_value=0.0, max_value=8.0, value=2.40, step=0.10
+    )
+
+# 4. Evaluación y decisión
+st.subheader("4. Análisis del modelo")
+if st.button("Calcular recomendación", type="primary"):
+    xg_l, xg_v = calcular_xg_moderado(
+        gf_local_10=gf_local_10,
+        gc_local_10=gc_local_10,
+        gf_vis_10=gf_vis_10,
+        gc_vis_10=gc_vis_10,
+        goles_h2h_prom=goles_h2h_prom,
+    )
+
+    resultado = evaluar_entrada_25(
+        xg_local=xg_l,
+        xg_visitante=xg_v,
+        cuota_over_25=cuota_over_25 if usar_over else None,
+        cuota_under_25=cuota_under_25 if usar_under else None,
+        min_edge=min_edge_pct / 100.0,
+        min_cuota_over=min_cuota_over,
+    )
+
+    partido_label = f"{equipo_local or 'Local'} vs {equipo_visitante or 'Visitante'}"
+    st.markdown(f"**Partido:** {partido_label}")
+
+    r1, r2, r3 = st.columns(3)
+    r1.metric("Goles esperados (xG)", f"{resultado['xg_total']:.2f}")
+    r2.metric("Prob. +2.5 goles", f"{resultado['p_over_25']:.1f}%")
+    r3.metric("Prob. -2.5 goles", f"{resultado['p_under_25']:.1f}%")
+
+    if resultado["decision"] == "APOSTAR":
+        st.success(
+            f"✅ **APOSTAR — {resultado['mercado']}** a cuota **{resultado['cuota']:.2f}** | "
+            f"Ventaja: **+{resultado['edge']:.1f}%** | EV: **{resultado['ev']:+.3f}**"
+        )
     else:
-        st.success(f"### Recomendación: {res['verdict']}")
-        m1, m2 = st.columns(2)
-        m1.metric("Prob. +2.5 Goles", f"{res['p_over'] * 100:.1f}%")
-        m2.metric("Prob. -2.5 Goles", f"{res['p_under'] * 100:.1f}%")
-        m3, m4 = st.columns(2)
-        m3.metric("Goles Esperados (λ)", f"{res['lambda']:.2f}")
-        m4.metric("Cuota Justa", f"@{res['fair_odd']:.2f}")
-
-        match_name = f"{home_team.strip()} vs {away_team.strip()}".strip(" vs") or "Partido sin nombre"
-        if st.button("Guardar pronóstico en historial CSV", type="primary"):
-            save_to_history({
-                "fecha": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                "partido": match_name,
-                "1X2": f"{odd_1:.2f} / {odd_x:.2f} / {odd_2:.2f}",
-                "lambda": round(res["lambda"], 2),
-                "prob_over25": f"{res['p_over'] * 100:.1f}%",
-                "prob_under25": f"{res['p_under'] * 100:.1f}%",
-                "veredicto": res["verdict"],
-            })
-            st.toast("Pronóstico guardado en historial_pronosticos.csv")
-
-st.divider()
-st.subheader("4. Historial guardado")
-if HISTORY_FILE.exists():
-    st.dataframe(pd.read_csv(HISTORY_FILE), use_container_width=True)
-else:
-    st.caption("Aún no hay pronósticos guardados en `historial_pronosticos.csv`.")
+        st.warning(f"⛔ **NO APOSTAR** — {resultado['motivo']}")
