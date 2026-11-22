@@ -41,6 +41,10 @@ PALABRAS_RUIDO = {
     "1XBET",
     "APUESTA EN",
     "DISPONIBLES",
+    "JORNADA",
+    "NUEVA VENTANA",
+    "PREMIER LEAGUE",
+    "HANDICAP ASIATICO",
 }
 
 
@@ -75,8 +79,18 @@ def limpiar_lineas_ocr(texto_ocr: str) -> list[str]:
         if not limpia:
             continue
 
-        # Ignora marcadores tipo 0-0, relojes tipo 7:06 o fechas tipo 21.11.2026
+        # Quita etiquetas de streaming o símbolos sueltos sin borrar el resto de la línea
+        limpia = re.sub(r"\bSTREAM\b", " ", limpia, flags=re.IGNORECASE)
+        limpia = re.sub(r"\s+", " ", limpia).strip(" |")
+        if not limpia:
+            continue
+
+        # Ignora marcadores tipo 0-0, relojes tipo 7:06 o fechas tipo 22.11.2026
         if re.fullmatch(r"\d{1,2}[:.\-]\d{1,2}(?:[:.\-]\d{2,4})?", limpia):
+            continue
+
+        # Ignora cabeceras con '@' o filas tipo '1 Xx 2'
+        if limpia.startswith("@") or re.fullmatch(r"1\s+[xX]{1,2}\s+2", limpia):
             continue
 
         mayus = limpia.upper()
@@ -93,17 +107,36 @@ def limpiar_lineas_ocr(texto_ocr: str) -> list[str]:
 
 
 def extraer_cuotas_winamax(texto_ocr: str) -> dict[str, float | None]:
-    """Busca específicamente la fila de WINAMAX y extrae las cuotas 1, X y 2."""
+    """Busca la fila de WINAMAX y extrae las cuotas 1, X y 2 (con o sin punto decimal)."""
     for linea in texto_ocr.splitlines():
         if "WINAMAX" in linea.upper():
             normalizada = linea.replace(",", ".")
-            candidatos = re.findall(r"\b\d+\.\d{2}\b", normalizada)
-            cuotas = [float(val) for val in candidatos if 1.05 <= float(val) <= 25.0]
+            cuotas: list[float] = []
+
+            # Primero busca cuotas con dos decimales (ej. 4.80, 1.52)
+            for match in re.finditer(r"\b\d+\.\d{2}\b", normalizada):
+                val = float(match.group(0))
+                if 1.05 <= val <= 25.0:
+                    cuotas.append(val)
+
+            # Si faltan cuotas, rescata números de 3 dígitos sin punto (ej. 480 -> 4.80, 152 -> 1.52)
+            if len(cuotas) < 3:
+                for match in re.finditer(r"\b(\d{3})\b", normalizada):
+                    val = int(match.group(1)) / 100.0
+                    if 1.05 <= val <= 25.0 and val not in cuotas:
+                        cuotas.append(round(val, 2))
+
             if len(cuotas) >= 3:
                 return {
                     "cuota_1": cuotas[0],
                     "cuota_x": cuotas[1],
                     "cuota_2": cuotas[2],
+                }
+            if len(cuotas) == 2:
+                return {
+                    "cuota_1": cuotas[0],
+                    "cuota_x": None,
+                    "cuota_2": cuotas[1],
                 }
             if len(cuotas) == 1:
                 return {
@@ -116,18 +149,27 @@ def extraer_cuotas_winamax(texto_ocr: str) -> dict[str, float | None]:
 
 
 def sugerir_equipos_candidatos(texto_ocr: str) -> tuple[str, str]:
-    """Sugiere equipo local y visitante evitando palabras de interfaz o símbolos."""
+    """Sugiere equipo local y visitante separando separadores como '>' o 'vs'."""
     lineas = limpiar_lineas_ocr(texto_ocr)
-    equipos = []
+    equipos: list[str] = []
+
     for linea in lineas:
         if "WINAMAX" in linea.upper():
             continue
-        if re.search(r"[|{}~<>\\]", linea):
+        if re.search(r"[|{}~<>\\]", linea) and ">" not in linea:
             continue
         if re.search(r"\d", linea):
             continue
-        if 2 <= len(linea) <= 35:
-            equipos.append(linea)
+
+        # Si viene en una misma línea separado por '>' o ' vs ' o ' - '
+        partes = re.split(r"\s*(?:>|\bvs\.?\b|\s-\s)\s*", linea, flags=re.IGNORECASE)
+        for parte in partes:
+            limpia_parte = parte.strip(" -|>/\\")
+            # Evita siglas de estadísticas sueltas en mayúsculas muy cortas tipo 'XN', 'PPK', 'GA'
+            if limpia_parte.isupper() and len(limpia_parte) <= 4:
+                continue
+            if 2 <= len(limpia_parte) <= 35 and limpia_parte not in equipos:
+                equipos.append(limpia_parte)
 
     local = equipos[0] if len(equipos) >= 1 else ""
     visitante = equipos[1] if len(equipos) >= 2 else ""
@@ -333,4 +375,73 @@ with c_over:
     )
 with c_under:
     usar_under = st.checkbox("Evaluar -2.5 goles", value=True)
-    cuota_under_
+    cuota_under_25 = st.number_input(
+        "Cuota -2.5 (Winamax)",
+        min_value=1.01,
+        max_value=20.00,
+        value=1.95,
+        step=0.01,
+        format="%.2f",
+        disabled=not usar_under,
+    )
+
+# 3. Medias de 10 partidos y H2H
+st.subheader("3. Promedios (últimos 10 partidos y H2H)")
+m1, m2 = st.columns(2)
+with m1:
+    gf_local_10 = st.number_input(
+        "Goles a favor Local (prom. 10)", min_value=0.0, max_value=6.0, value=1.40, step=0.05
+    )
+    gc_local_10 = st.number_input(
+        "Goles en contra Local (prom. 10)", min_value=0.0, max_value=6.0, value=1.10, step=0.05
+    )
+with m2:
+    gf_vis_10 = st.number_input(
+        "Goles a favor Visitante (prom. 10)", min_value=0.0, max_value=6.0, value=1.20, step=0.05
+    )
+    gc_vis_10 = st.number_input(
+        "Goles en contra Visitante (prom. 10)", min_value=0.0, max_value=6.0, value=1.20, step=0.05
+    )
+
+usar_h2h = st.checkbox("Incluir promedio de goles en H2H", value=False)
+goles_h2h_prom = None
+if usar_h2h:
+    goles_h2h_prom = st.number_input(
+        "Promedio goles totales H2H", min_value=0.0, max_value=8.0, value=2.40, step=0.10
+    )
+
+# 4. Evaluación y decisión
+st.subheader("4. Análisis del modelo")
+if st.button("Calcular recomendación", type="primary"):
+    xg_l, xg_v = calcular_xg_moderado(
+        gf_local_10=gf_local_10,
+        gc_local_10=gc_local_10,
+        gf_vis_10=gf_vis_10,
+        gc_vis_10=gc_vis_10,
+        goles_h2h_prom=goles_h2h_prom,
+    )
+
+    resultado = evaluar_entrada_25(
+        xg_local=xg_l,
+        xg_visitante=xg_v,
+        cuota_over_25=cuota_over_25 if usar_over else None,
+        cuota_under_25=cuota_under_25 if usar_under else None,
+        min_edge=min_edge_pct / 100.0,
+        min_cuota_over=min_cuota_over,
+    )
+
+    partido_label = f"{equipo_local or 'Local'} vs {equipo_visitante or 'Visitante'}"
+    st.markdown(f"**Partido:** {partido_label}")
+
+    r1, r2, r3 = st.columns(3)
+    r1.metric("Goles esperados (xG)", f"{resultado['xg_total']:.2f}")
+    r2.metric("Prob. +2.5 goles", f"{resultado['p_over_25']:.1f}%")
+    r3.metric("Prob. -2.5 goles", f"{resultado['p_under_25']:.1f}%")
+
+    if resultado["decision"] == "APOSTAR":
+        st.success(
+            f"✅ **APOSTAR — {resultado['mercado']}** a cuota **{resultado['cuota']:.2f}** | "
+            f"Ventaja: **+{resultado['edge']:.1f}%** | EV: **{resultado['ev']:+.3f}**"
+        )
+    else:
+        st.warning(f"⛔ **NO APOSTAR** — {resultado['motivo']}")
