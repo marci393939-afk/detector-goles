@@ -368,4 +368,129 @@ archivo = st.file_uploader(
 )
 
 with st.expander("Ajustes de lectura y filtros"):
-    psm = st.selectbox("Modo de segmentación OCR (PSM)", options=[6, 4
+    psm = st.selectbox("Modo de segmentación OCR (PSM)", options=[6, 4, 11, 3], index=0)
+    min_edge_pct = st.slider(
+        "Ventaja mínima sobre cuota (%)", min_value=2.0, max_value=20.0, value=7.0, step=0.5
+    )
+    min_cuota_over = st.slider(
+        "Cuota mínima en +2.5 goles", min_value=1.30, max_value=2.50, value=1.60, step=0.05
+    )
+
+texto_ocr = ""
+local_sugerido = ""
+visitante_sugerido = ""
+cuotas_winamax = {"cuota_1": None, "cuota_x": None, "cuota_2": None}
+partido_detectado = False
+
+if archivo is not None:
+    img_bytes = archivo.getvalue()
+    imagen_original = Image.open(BytesIO(img_bytes))
+    st.image(
+        imagen_original,
+        caption=f"Captura cargada ({imagen_original.width}x{imagen_original.height} px)",
+        use_container_width=True,
+    )
+
+    if st.button("Reescanear captura automáticamente"):
+        st.cache_data.clear()
+
+    try:
+        texto_ocr = ejecutar_ocr_bytes(img_bytes, psm=psm)
+        local_sugerido, visitante_sugerido = sugerir_equipos_candidatos(texto_ocr)
+        cuotas_winamax = extraer_cuotas_winamax(texto_ocr)
+        partido_detectado = bool(local_sugerido or visitante_sugerido)
+    except Exception as exc:
+        st.error(f"Error al ejecutar OCR: {exc}")
+
+    with st.expander("Ver texto detectado automáticamente en la captura"):
+        st.text(texto_ocr if texto_ocr.strip() else "No se detectó texto.")
+
+st.subheader("2. Partido y cuotas (+2.5 / -2.5)")
+col1, col2 = st.columns(2)
+with col1:
+    equipo_local = st.text_input("Equipo Local", value=local_sugerido)
+with col2:
+    equipo_visitante = st.text_input("Equipo Visitante", value=visitante_sugerido)
+
+if any(v is not None for v in cuotas_winamax.values()):
+    st.info(
+        f"Winamax detectado en captura (1 / X / 2): "
+        f"{cuotas_winamax['cuota_1'] or '-'} / {cuotas_winamax['cuota_x'] or '-'} / {cuotas_winamax['cuota_2'] or '-'}"
+    )
+
+c_over, c_under = st.columns(2)
+with c_over:
+    usar_over = st.checkbox("Evaluar +2.5 goles", value=True)
+    cuota_over_25 = st.number_input(
+        "Cuota +2.5 (Winamax)",
+        min_value=1.01,
+        max_value=20.00,
+        value=1.85,
+        step=0.01,
+        format="%.2f",
+        disabled=not usar_over,
+    )
+with c_under:
+    usar_under = st.checkbox("Evaluar -2.5 goles", value=True)
+    cuota_under_25 = st.number_input(
+        "Cuota -2.5 (Winamax)",
+        min_value=1.01,
+        max_value=20.00,
+        value=1.95,
+        step=0.01,
+        format="%.2f",
+        disabled=not usar_under,
+    )
+
+st.subheader("3. Promedios (últimos 10 partidos y H2H)")
+m1, m2 = st.columns(2)
+with m1:
+    gf_local_10 = st.number_input(
+        "Goles a favor Local (prom. 10)", min_value=0.0, max_value=6.0, value=1.40, step=0.05
+    )
+    gc_local_10 = st.number_input(
+        "Goles en contra Local (prom. 10)", min_value=0.0, max_value=6.0, value=1.10, step=0.05
+    )
+with m2:
+    gf_vis_10 = st.number_input(
+        "Goles a favor Visitante (prom. 10)", min_value=0.0, max_value=6.0, value=1.20, step=0.05
+    )
+    gc_vis_10 = st.number_input(
+        "Goles en contra Visitante (prom. 10)", min_value=0.0, max_value=6.0, value=1.20, step=0.05
+    )
+
+usar_h2h = st.checkbox("Incluir promedio de goles en H2H", value=False)
+goles_h2h_prom = None
+if usar_h2h:
+    goles_h2h_prom = st.number_input(
+        "Promedio goles totales H2H", min_value=0.0, max_value=8.0, value=2.40, step=0.10
+    )
+
+xg_l, xg_v = calcular_xg_moderado(
+    gf_local_10=gf_local_10,
+    gc_local_10=gc_local_10,
+    gf_vis_10=gf_vis_10,
+    gc_vis_10=gc_vis_10,
+    goles_h2h_prom=goles_h2h_prom,
+)
+
+resultado_actual = evaluar_entrada_25(
+    xg_local=xg_l,
+    xg_visitante=xg_v,
+    cuota_over_25=cuota_over_25 if usar_over else None,
+    cuota_under_25=cuota_under_25 if usar_under else None,
+    min_edge=min_edge_pct / 100.0,
+    min_cuota_over=min_cuota_over,
+)
+
+partido_label = f"{equipo_local or 'Local'} vs {equipo_visitante or 'Visitante'}"
+
+if partido_detectado:
+    st.divider()
+    st.subheader("⚡ Veredicto inmediato del partido detectado")
+    renderizar_resultado(resultado_actual, partido_label)
+
+st.divider()
+st.subheader("4. Análisis del modelo")
+if st.button("Calcular recomendación", type="primary"):
+    renderizar_resultado(resultado_actual, partido_label)
