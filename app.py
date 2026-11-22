@@ -2,7 +2,6 @@ import math
 import re
 from io import BytesIO
 
-import numpy as np
 from PIL import Image, ImageEnhance, ImageOps
 import pytesseract
 import streamlit as st
@@ -225,7 +224,6 @@ def calcular_xg_moderado(
     Calcula goles esperados moderando extremos con medias de 10 partidos
     y un peso ligero opcional de enfrentamientos directos (H2H).
     """
-  gf_l = min(max(gf_local_10, 0.15), 4.2)
+    gf_l = min(max(gf_local_10, 0.15), 4.2)
     gc_l = min(max(gc_local_10, 0.15), 4.2)
     gf_v = min(max(gf_vis_10, 0.15), 4.2)
-    gc_v = min(max(gc_vis_10, 0.15), 4.2)
