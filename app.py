@@ -358,44 +358,4 @@ def evaluar_entrada_25(
         "prob_implicita": mejor["prob_implicita"],
         "edge": mejor["edge"],
         "ev": mejor["ev"],
-        "xg_total": probs["xg_total"],
-        "p_over_25": round(p_over * 100, 1),
-        "p_under_25": round(p_under * 100, 1),
-        "desglose": desglose,
-    }
-
-
-def renderizar_resultado(resultado: dict, partido_label: str) -> None:
-    """Muestra el veredicto directo (+2.5 goles, -2.5 goles o NO APOSTAR) y métricas."""
-    st.markdown(f"**Partido:** {partido_label}")
-
-    r1, r2, r3 = st.columns(3)
-    r1.metric("Goles esperados (xG)", f"{resultado['xg_total']:.2f}")
-    r2.metric("Prob. +2.5 goles", f"{resultado['p_over_25']:.1f}%")
-    r3.metric("Prob. -2.5 goles", f"{resultado['p_under_25']:.1f}%")
-
-    if resultado["decision"] == "APOSTAR":
-        st.success(
-            f"### ✅ APOSTAR → {resultado['mercado'].upper()}\n"
-            f"**Cuota:** `{resultado['cuota']:.2f}` | "
-            f"**Ventaja:** `+{resultado['edge']:.1f}%` | "
-            f"**EV:** `{resultado['ev']:+.3f}`"
-        )
-    else:
-        st.warning(f"### ⛔ NO APOSTAR\n{resultado['motivo']}")
-
-    if resultado.get("desglose"):
-        st.dataframe(resultado["desglose"], width="stretch", hide_index=True)
-
-
-st.title("⚽ Detector de Goles (+2.5 / -2.5)")
-st.caption("Lectura OCR de capturas, proyección de goles y filtro de valor para Winamax.")
-
-st.subheader("1. Captura de pantalla")
-archivo = st.file_uploader(
-    "Sube una captura recortada de equipos o cuotas de Winamax",
-    type=["png", "jpg", "jpeg", "webp"],
-)
-
-with st.expander("Ajustes de lectura y filtros"):
-    psm = st.selectbox("Modo de segmentación OCR (PSM)", options=[6, 4
+        "xg
