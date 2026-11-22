@@ -123,23 +123,24 @@ def limpiar_lineas_ocr(texto_ocr: str) -> list[str]:
     return lineas_limpias
 
 
-def extraer_cuotas_winamax(texto_ocr: str) -> dict[str, float | None]:
-    """Busca la fila de WINAMAX y extrae las cuotas 1, X y 2 (con o sin punto decimal)."""
+def extraer_cuotas_winamax(texto_ocr: str) -> dict[str, str | None]:
+    """Busca la fila de WINAMAX y extrae las cuotas 1, X y 2 respetando su orden."""
     for linea in texto_ocr.splitlines():
         if "WINAMAX" in linea.upper():
             normalizada = linea.replace(",", ".")
-            cuotas: list[float] = []
+            cuotas: list[str] = []
 
-            for match in re.finditer(r"\b\d+\.\d{2}\b", normalizada):
+            for match in re.finditer(r"(?<!\d)\d+\.\d{1,2}(?!\d)", normalizada):
                 val = float(match.group(0))
                 if 1.05 <= val <= 25.0:
-                    cuotas.append(val)
+                    cuotas.append(f"{val:.2f}")
 
             if len(cuotas) < 3:
-                for match in re.finditer(r"\b(\d{3})\b", normalizada):
-                    val = int(match.group(1)) / 100.0
-                    if 1.05 <= val <= 25.0 and val not in cuotas:
-                        cuotas.append(round(val, 2))
+                for match in re.finditer(r"(?<!\d)\d{3}(?!\d)", normalizada):
+                    val = int(match.group(0)) / 100.0
+                    texto_val = f"{val:.2f}"
+                    if 1.05 <= val <= 25.0 and len(cuotas) < 3:
+                        cuotas.append(texto_val)
 
             if len(cuotas) >= 3:
                 return {
