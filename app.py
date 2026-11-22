@@ -324,6 +324,26 @@ def evaluar_entrada_25(
     }
 
 
+def renderizar_resultado(resultado: dict, partido_label: str) -> None:
+    """Muestra el veredicto directo (+2.5 goles, -2.5 goles o NO APOSTAR) y métricas."""
+    st.markdown(f"**Partido:** {partido_label}")
+
+    r1, r2, r3 = st.columns(3)
+    r1.metric("Goles esperados (xG)", f"{resultado['xg_total']:.2f}")
+    r2.metric("Prob. +2.5 goles", f"{resultado['p_over_25']:.1f}%")
+    r3.metric("Prob. -2.5 goles", f"{resultado['p_under_25']:.1f}%")
+
+    if resultado["decision"] == "APOSTAR":
+        st.success(
+            f"### ✅ APOSTAR → {resultado['mercado'].upper()}\n"
+            f"**Cuota:** `{resultado['cuota']:.2f}` | "
+            f"**Ventaja:** `+{resultado['edge']:.1f}%` | "
+            f"**EV:** `{resultado['ev']:+.3f}`"
+        )
+    else:
+        st.warning(f"### ⛔ NO APOSTAR\n{resultado['motivo']}")
+
+
 st.title("⚽ Detector de Goles (+2.5 / -2.5)")
 st.caption("Lectura OCR de capturas, proyección de goles y filtro de valor para Winamax.")
 
@@ -347,6 +367,7 @@ texto_ocr = ""
 local_sugerido = ""
 visitante_sugerido = ""
 cuotas_winamax = {"cuota_1": None, "cuota_x": None, "cuota_2": None}
+partido_detectado = False
 
 if archivo is not None:
     img_bytes = archivo.getvalue()
@@ -364,6 +385,7 @@ if archivo is not None:
         texto_ocr = ejecutar_ocr_bytes(img_bytes, psm=psm)
         local_sugerido, visitante_sugerido = sugerir_equipos_candidatos(texto_ocr)
         cuotas_winamax = extraer_cuotas_winamax(texto_ocr)
+        partido_detectado = bool(local_sugerido or visitante_sugerido)
     except Exception as exc:
         st.error(f"Error al ejecutar OCR: {exc}")
 
@@ -433,38 +455,33 @@ if usar_h2h:
         "Promedio goles totales H2H", min_value=0.0, max_value=8.0, value=2.40, step=0.10
     )
 
+xg_l, xg_v = calcular_xg_moderado(
+    gf_local_10=gf_local_10,
+    gc_local_10=gc_local_10,
+    gf_vis_10=gf_vis_10,
+    gc_vis_10=gc_vis_10,
+    goles_h2h_prom=goles_h2h_prom,
+)
+
+resultado_actual = evaluar_entrada_25(
+    xg_local=xg_l,
+    xg_visitante=xg_v,
+    cuota_over_25=cuota_over_25 if usar_over else None,
+    cuota_under_25=cuota_under_25 if usar_under else None,
+    min_edge=min_edge_pct / 100.0,
+    min_cuota_over=min_cuota_over,
+)
+
+partido_label = f"{equipo_local or 'Local'} vs {equipo_visitante or 'Visitante'}"
+
+# Veredicto inmediato en cuanto se detecta el partido en la captura
+if partido_detectado:
+    st.divider()
+    st.subheader("⚡ Veredicto inmediato del partido detectado")
+    renderizar_resultado(resultado_actual, partido_label)
+
 # 4. Evaluación y decisión
+st.divider()
 st.subheader("4. Análisis del modelo")
 if st.button("Calcular recomendación", type="primary"):
-    xg_l, xg_v = calcular_xg_moderado(
-        gf_local_10=gf_local_10,
-        gc_local_10=gc_local_10,
-        gf_vis_10=gf_vis_10,
-        gc_vis_10=gc_vis_10,
-        goles_h2h_prom=goles_h2h_prom,
-    )
-
-    resultado = evaluar_entrada_25(
-        xg_local=xg_l,
-        xg_visitante=xg_v,
-        cuota_over_25=cuota_over_25 if usar_over else None,
-        cuota_under_25=cuota_under_25 if usar_under else None,
-        min_edge=min_edge_pct / 100.0,
-        min_cuota_over=min_cuota_over,
-    )
-
-    partido_label = f"{equipo_local or 'Local'} vs {equipo_visitante or 'Visitante'}"
-    st.markdown(f"**Partido:** {partido_label}")
-
-    r1, r2, r3 = st.columns(3)
-    r1.metric("Goles esperados (xG)", f"{resultado['xg_total']:.2f}")
-    r2.metric("Prob. +2.5 goles", f"{resultado['p_over_25']:.1f}%")
-    r3.metric("Prob. -2.5 goles", f"{resultado['p_under_25']:.1f}%")
-
-    if resultado["decision"] == "APOSTAR":
-        st.success(
-            f"✅ **APOSTAR — {resultado['mercado']}** a cuota **{resultado['cuota']:.2f}** | "
-            f"Ventaja: **+{resultado['edge']:.1f}%** | EV: **{resultado['ev']:+.3f}**"
-        )
-    else:
-        st.warning(f"⛔ **NO APOSTAR** — {resultado['motivo']}")
+    renderizar_resultado(resultado_actual, partido_label)
