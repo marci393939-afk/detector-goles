@@ -1,9 +1,11 @@
 import math
 import re
+import unicodedata
 from io import BytesIO
 
 from PIL import Image, ImageEnhance, ImageOps
 import pytesseract
+import requests
 import streamlit as st
 
 
@@ -12,6 +14,64 @@ st.set_page_config(
     page_icon="⚽",
     layout="centered",
 )
+
+API_BASE_URL = "https://v3.football.api-sports.io"
+
+ALIAS_EQUIPOS = {
+    "marsella": "Marseille",
+    "olympique marsella": "Marseille",
+    "olympique de marsella": "Marseille",
+    "psg": "Paris Saint Germain",
+    "paris sg": "Paris Saint Germain",
+    "bayern": "Bayern Munich",
+    "bayern munich": "Bayern Munich",
+    "inter": "Inter",
+    "inter milan": "Inter",
+    "ac milan": "AC Milan",
+    "milan": "AC Milan",
+    "atletico": "Atletico Madrid",
+    "atletico madrid": "Atletico Madrid",
+    "atletico de madrid": "Atletico Madrid",
+    "athletic": "Athletic Club",
+    "athletic bilbao": "Athletic Club",
+    "betis": "Real Betis",
+    "celta": "Celta Vigo",
+    "celta de vigo": "Celta Vigo",
+    "espanyol": "Espanyol",
+    "espanol": "Espanyol",
+    "sevilla": "Sevilla",
+    "barcelona": "Barcelona",
+    "fc barcelona": "Barcelona",
+    "real madrid": "Real Madrid",
+    "manchester utd": "Manchester United",
+    "manchester united": "Manchester United",
+    "manchester city": "Manchester City",
+    "newcastle": "Newcastle",
+    "tottenham": "Tottenham",
+    "sporting": "Sporting CP",
+    "sporting lisboa": "Sporting CP",
+    "oporto": "FC Porto",
+    "porto": "FC Porto",
+    "benfica": "Benfica",
+    "estrasburgo": "Strasbourg",
+    "niza": "Nice",
+    "lyon": "Lyon",
+    "monaco": "Monaco",
+    "lille": "Lille",
+    "colonia": "FC Koln",
+    "maguncia": "FSV Mainz 05",
+    "friburgo": "SC Freiburg",
+    "eintracht": "Eintracht Frankfurt",
+    "dortmund": "Borussia Dortmund",
+    "borussia dortmund": "Borussia Dortmund",
+    "leverkusen": "Bayer Leverkusen",
+    "napoles": "Napoli",
+    "napoli": "Napoli",
+    "juventus": "Juventus",
+    "roma": "AS Roma",
+    "lazio": "Lazio",
+    "fiorentina": "Fiorentina",
+}
 
 PALABRAS_RUIDO = {
     "TIEMPO",
@@ -50,6 +110,153 @@ PALABRAS_RUIDO = {
     "MAS SELECCIONES",
     "MÁS SELECCIONES",
 }
+
+
+def normalizar_texto(texto: str) -> str:
+    sin_tildes = "".join(
+        c for c in unicodedata.normalize("NFD", texto) if unicodedata.category(c) != "Mn"
+    )
+    return re.sub(r"\s+", " ", sin_tildes).strip().lower()
+
+
+def preparar_nombre_busqueda(nombre: str) -> str:
+    clave = normalizar_texto(nombre)
+    if clave in ALIAS_EQUIPOS:
+        return ALIAS_EQUIPOS[clave]
+    limpio = re.sub(r"^(?:fc|cf|cd|ud|rcd|ca|ac|as|sc|ss|us)\s+", "", clave)
+    limpio = re.sub(r"\s+(?:fc|cf|sad)$", "", limpio)
+    if limpio in ALIAS_EQUIPOS:
+        return ALIAS_EQUIPOS[limpio]
+    return nombre.strip()
+
+
+def obtener_api_key(key_manual: str) -> str:
+    if key_manual and key_manual.strip():
+        return key_manual.strip()
+    try:
+        return st.secrets.get("API_FOOTBALL_KEY", "").strip()
+    except Exception:
+        return ""
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def api_get(endpoint: str, params_items: tuple[tuple[str, str], ...], api_key: str) -> dict:
+    headers = {"x-apisports-key": api_key}
+    resp = requests.get(
+        f"{API_BASE_URL}/{endpoint}",
+        headers=headers,
+        params=dict(params_items),
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def buscar_equipo_api(nombre: str, api_key: str) -> dict | None:
+    consulta = preparar_nombre_busqueda(nombre)
+    data = api_get("teams", (("search", consulta),), api_key)
+    errores = data.get("errors")
+    if errores:
+        raise RuntimeError(str(errores))
+
+    resultados = data.get("response", [])
+    if not resultados and consulta != nombre.strip():
+        data = api_get("teams", (("search", nombre.strip()),), api_key)
+        resultados = data.get("response", [])
+
+    if not resultados:
+        return None
+
+    objetivo = normalizar_texto(consulta)
+    for item in resultados:
+        team = item.get("team", {})
+        if normalizar_texto(team.get("name", "")) == objetivo:
+            return team
+
+    for item in resultados:
+        team = item.get("team", {})
+        if not team.get("national", False):
+            return team
+
+    return resultados[0].get("team")
+
+
+def obtener_promedios_10_api(team_id: int, api_key: str) -> dict | None:
+    data = api_get(
+        "fixtures",
+        (("team", str(team_id)), ("last", "10"), ("status", "FT")),
+        api_key,
+    )
+    errores = data.get("errors")
+    if errores:
+        raise RuntimeError(str(errores))
+
+    partidos = data.get("response", [])
+    if not partidos:
+        return None
+
+    gf_total = 0
+    gc_total = 0
+    validos = 0
+
+    for f in partidos:
+        teams = f.get("teams", {})
+        goals = f.get("goals", {})
+        home_id = teams.get("home", {}).get("id")
+        away_id = teams.get("away", {}).get("id")
+        g_home = goals.get("home")
+        g_away = goals.get("away")
+
+        if g_home is None or g_away is None:
+            continue
+
+        if home_id == team_id:
+            gf_total += int(g_home)
+            gc_total += int(g_away)
+            validos += 1
+        elif away_id == team_id:
+            gf_total += int(g_away)
+            gc_total += int(g_home)
+            validos += 1
+
+    if validos == 0:
+        return None
+
+    return {
+        "partidos": validos,
+        "gf_prom": round(gf_total / validos, 2),
+        "gc_prom": round(gc_total / validos, 2),
+    }
+
+
+def obtener_h2h_api(team_local_id: int, team_vis_id: int, api_key: str) -> dict | None:
+    data = api_get(
+        "fixtures/headtohead",
+        (("h2h", f"{team_local_id}-{team_vis_id}"), ("last", "6"), ("status", "FT")),
+        api_key,
+    )
+    errores = data.get("errors")
+    if errores:
+        return None
+
+    partidos = data.get("response", [])
+    total_goles = 0
+    validos = 0
+    for f in partidos:
+        goals = f.get("goals", {})
+        g_home = goals.get("home")
+        g_away = goals.get("away")
+        if g_home is not None and g_away is not None:
+            total_goles += int(g_home) + int(g_away)
+            validos += 1
+
+    if validos == 0:
+        return None
+
+    return {
+        "partidos": validos,
+        "goles_prom": round(total_goles / validos, 2),
+    }
 
 
 def preparar_imagen_ocr(imagen: Image.Image) -> Image.Image:
@@ -359,8 +566,24 @@ def renderizar_resultado(resultado: dict, partido_label: str) -> None:
         st.dataframe(resultado["desglose"], width="stretch", hide_index=True)
 
 
+for clave, valor_ini in {
+    "gf_local_10": 1.40,
+    "gc_local_10": 1.10,
+    "gf_vis_10": 1.20,
+    "gc_vis_10": 1.20,
+    "goles_h2h_prom": 2.40,
+    "usar_h2h": False,
+    "cuota_over_25_manual": 1.55,
+    "cuota_under_25_manual": 2.35,
+    "api_info_msg": "",
+    "api_warn_msg": "",
+}.items():
+    if clave not in st.session_state:
+        st.session_state[clave] = valor_ini
+
+
 st.title("⚽ Detector de Goles (+2.5 / -2.5)")
-st.caption("Equipos por captura, cuotas manuales de Winamax y filtro de valor (+2.5 / -2.5).")
+st.caption("Equipos por captura, estadísticas reales vía API-Football (v3) y cuotas manuales de Winamax.")
 
 st.subheader("1. Captura de partido (opcional)")
 archivo = st.file_uploader(
@@ -368,7 +591,14 @@ archivo = st.file_uploader(
     type=["png", "jpg", "jpeg", "webp"],
 )
 
-with st.expander("Ajustes de lectura y filtros"):
+with st.expander("Ajustes de API-Football, OCR y filtros"):
+    api_key_input = st.text_input(
+        "API-Football Key (opcional si ya está en st.secrets['API_FOOTBALL_KEY'])",
+        type="password",
+    )
+    auto_fetch = st.checkbox(
+        "Buscar promedios automáticamente al subir una captura nueva", value=True
+    )
     psm = st.selectbox("Modo de segmentación OCR (PSM)", options=[6, 4, 11, 3], index=0)
     min_edge_pct = st.slider(
         "Ventaja mínima sobre cuota (%)", min_value=1.0, max_value=25.0, value=5.0, step=0.5
@@ -414,10 +644,88 @@ with col2:
         "Equipo Visitante", value=visitante_sugerido, key="equipo_visitante_input"
     )
 
-if "cuota_over_25_manual" not in st.session_state:
-    st.session_state["cuota_over_25_manual"] = 1.44
-if "cuota_under_25_manual" not in st.session_state:
-    st.session_state["cuota_under_25_manual"] = 2.60
+api_key_activa = obtener_api_key(api_key_input)
+
+
+def actualizar_estadisticas_desde_api(loc: str, vis: str, key: str) -> None:
+    st.session_state["api_info_msg"] = ""
+    st.session_state["api_warn_msg"] = ""
+
+    if not key:
+        st.session_state["api_warn_msg"] = (
+            "Falta la clave de API-Football (añádela en Secrets como API_FOOTBALL_KEY o en Ajustes)."
+        )
+        return
+
+    if not loc.strip() or not vis.strip():
+        st.session_state["api_warn_msg"] = "Introduce ambos equipos antes de buscar estadísticas."
+        return
+
+    try:
+        team_l = buscar_equipo_api(loc, key)
+        team_v = buscar_equipo_api(vis, key)
+
+        if not team_l or not team_v:
+            no_encontrado = loc if not team_l else vis
+            st.session_state["api_warn_msg"] = (
+                f"No se encontró '{no_encontrado}' en API-Football. Revisa el nombre o rellena los promedios a mano."
+            )
+            return
+
+        stats_l = obtener_promedios_10_api(team_l["id"], key)
+        stats_v = obtener_promedios_10_api(team_v["id"], key)
+
+        if not stats_l or not stats_v:
+            st.session_state["api_warn_msg"] = (
+                "API-Football no devolvió últimos 10 partidos (puede ser una restricción de temporada del plan gratuito)."
+            )
+            return
+
+        st.session_state["gf_local_10"] = float(stats_l["gf_prom"])
+        st.session_state["gc_local_10"] = float(stats_l["gc_prom"])
+        st.session_state["gf_vis_10"] = float(stats_v["gf_prom"])
+        st.session_state["gc_vis_10"] = float(stats_v["gc_prom"])
+
+        h2h = obtener_h2h_api(team_l["id"], team_v["id"], key)
+        if h2h and h2h["partidos"] >= 2:
+            st.session_state["goles_h2h_prom"] = float(h2h["goles_prom"])
+            st.session_state["usar_h2h"] = True
+            h2h_txt = f" | H2H ({h2h['partidos']} partidos): {h2h['goles_prom']:.2f} goles/partido"
+        else:
+            st.session_state["usar_h2h"] = False
+            h2h_txt = " | H2H sin datos suficientes"
+
+        st.session_state["api_info_msg"] = (
+            f"Datos cargados: **{team_l['name']}** ({stats_l['partidos']} PJ: "
+            f"GF {stats_l['gf_prom']:.2f}, GC {stats_l['gc_prom']:.2f}) vs "
+            f"**{team_v['name']}** ({stats_v['partidos']} PJ: "
+            f"GF {stats_v['gf_prom']:.2f}, GC {stats_v['gc_prom']:.2f}){h2h_txt}"
+        )
+    except Exception as exc:
+        st.session_state["api_warn_msg"] = f"Error al consultar API-Football: {exc}"
+
+
+if (
+    archivo is not None
+    and auto_fetch
+    and api_key_activa
+    and equipo_local.strip()
+    and equipo_visitante.strip()
+):
+    par_id = f"{archivo.file_id}_{equipo_local.strip()}_{equipo_visitante.strip()}"
+    if st.session_state.get("ultimo_auto_fetch") != par_id:
+        with st.spinner("Consultando últimos 10 partidos en API-Football..."):
+            actualizar_estadisticas_desde_api(equipo_local, equipo_visitante, api_key_activa)
+        st.session_state["ultimo_auto_fetch"] = par_id
+
+if st.button("🔄 Buscar promedios reales en API-Football"):
+    with st.spinner("Consultando últimos 10 partidos y H2H en API-Football..."):
+        actualizar_estadisticas_desde_api(equipo_local, equipo_visitante, api_key_activa)
+
+if st.session_state["api_info_msg"]:
+    st.success(st.session_state["api_info_msg"])
+if st.session_state["api_warn_msg"]:
+    st.warning(st.session_state["api_warn_msg"])
 
 c_over, c_under = st.columns(2)
 with c_over:
@@ -443,28 +751,48 @@ with c_under:
         key="cuota_under_25_manual",
     )
 
-st.subheader("3. Promedios reales (últimos 10 partidos y H2H)")
+st.subheader("3. Promedios (últimos 10 partidos y H2H)")
 m1, m2 = st.columns(2)
 with m1:
     gf_local_10 = st.number_input(
-        "Goles a favor Local (prom. 10)", min_value=0.0, max_value=6.0, value=1.40, step=0.05
+        "Goles a favor Local (prom. 10)",
+        min_value=0.0,
+        max_value=6.0,
+        step=0.05,
+        key="gf_local_10",
     )
     gc_local_10 = st.number_input(
-        "Goles en contra Local (prom. 10)", min_value=0.0, max_value=6.0, value=1.10, step=0.05
+        "Goles en contra Local (prom. 10)",
+        min_value=0.0,
+        max_value=6.0,
+        step=0.05,
+        key="gc_local_10",
     )
 with m2:
     gf_vis_10 = st.number_input(
-        "Goles a favor Visitante (prom. 10)", min_value=0.0, max_value=6.0, value=1.20, step=0.05
+        "Goles a favor Visitante (prom. 10)",
+        min_value=0.0,
+        max_value=6.0,
+        step=0.05,
+        key="gf_vis_10",
     )
     gc_vis_10 = st.number_input(
-        "Goles en contra Visitante (prom. 10)", min_value=0.0, max_value=6.0, value=1.20, step=0.05
+        "Goles en contra Visitante (prom. 10)",
+        min_value=0.0,
+        max_value=6.0,
+        step=0.05,
+        key="gc_vis_10",
     )
 
-usar_h2h = st.checkbox("Incluir promedio de goles en H2H", value=False)
+usar_h2h = st.checkbox("Incluir promedio de goles en H2H", key="usar_h2h")
 goles_h2h_prom = None
 if usar_h2h:
     goles_h2h_prom = st.number_input(
-        "Promedio goles totales H2H", min_value=0.0, max_value=8.0, value=2.40, step=0.10
+        "Promedio goles totales H2H",
+        min_value=0.0,
+        max_value=8.0,
+        step=0.10,
+        key="goles_h2h_prom",
     )
 
 xg_l, xg_v = calcular_xg_moderado(
