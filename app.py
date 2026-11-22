@@ -24,6 +24,29 @@ QUICK_PRESETS_GOAL = {
     "Walter Ferretti vs Sport Sébaco": ("Walter Ferretti", "Sport Sébaco", "Nicaragua"),
 }
 
+KNOWN_GOAL_TEAMS = {
+    "walter ferretti": {
+        "id": "cmrjf2lag9qkat507x53p82tx",
+        "name": "Walter Ferretti",
+        "country": "Nicaragua",
+    },
+    "ferretti": {
+        "id": "cmrjf2lag9qkat507x53p82tx",
+        "name": "Walter Ferretti",
+        "country": "Nicaragua",
+    },
+    "sport sebaco": {
+        "id": "cmrjezgrc8op7t507hqulwamp",
+        "name": "Sport Sébaco",
+        "country": "Nicaragua",
+    },
+    "sebaco": {
+        "id": "cmrjezgrc8op7t507hqulwamp",
+        "name": "Sport Sébaco",
+        "country": "Nicaragua",
+    },
+}
+
 ALIAS_EQUIPOS = {
     "marsella": "Marseille",
     "olympique marsella": "Marseille",
@@ -304,14 +327,29 @@ def goal_search_teams_cached(query: str, country: str | None, goal_key: str) -> 
     if not clean_query or not goal_key:
         return []
 
-    resp = requests.get(
-        f"{GOAL_API_BASE_URL}/teams",
-        headers={"Authorization": f"Bearer {goal_key}"},
-        params={"search": clean_query, "limit": 50},
-        timeout=15,
-    )
-    resp.raise_for_status()
-    items = resp.json().get("data", [])
+    headers = {"Authorization": f"Bearer {goal_key}"}
+    candidatos_busqueda = [clean_query]
+    sin_tilde = normalizar_texto(clean_query)
+    if sin_tilde and sin_tilde != clean_query.lower():
+        candidatos_busqueda.append(sin_tilde)
+
+    items: list[dict] = []
+    for termino in candidatos_busqueda:
+        for limite in (20, 10):
+            resp = requests.get(
+                f"{GOAL_API_BASE_URL}/teams",
+                headers=headers,
+                params={"search": termino, "limit": limite},
+                timeout=15,
+            )
+            if resp.status_code == 400:
+                continue
+            resp.raise_for_status()
+            items = resp.json().get("data", [])
+            if items:
+                break
+        if items:
+            break
 
     if country and country.strip():
         c_norm = normalizar_texto(country)
@@ -327,6 +365,10 @@ def goal_search_teams_cached(query: str, country: str | None, goal_key: str) -> 
 
 
 def goal_resolve_team(name: str, country: str | None, goal_key: str) -> dict | None:
+    clave_norm = normalizar_texto(name)
+    if clave_norm in KNOWN_GOAL_TEAMS:
+        return KNOWN_GOAL_TEAMS[clave_norm]
+
     candidates = goal_search_teams_cached(name, country, goal_key)
     if not candidates and country:
         candidates = goal_search_teams_cached(name, None, goal_key)
@@ -334,7 +376,7 @@ def goal_resolve_team(name: str, country: str | None, goal_key: str) -> dict | N
     if not candidates:
         return None
 
-    target_lower = normalizar_texto(name)
+    target_lower = clave_norm
 
     def score_candidate(team: dict) -> tuple:
         t_name = normalizar_texto(team.get("name") or "")
