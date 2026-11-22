@@ -46,6 +46,9 @@ PALABRAS_RUIDO = {
     "HACER UNA APUESTA",
     "CASA DE APUESTAS",
     "DOBLE OPORTUNID",
+    "RESULTADO EXACTO",
+    "MAS SELECCIONES",
+    "MÁS SELECCIONES",
 }
 
 
@@ -53,8 +56,8 @@ def preparar_imagen_ocr(imagen: Image.Image) -> Image.Image:
     """Mejora escala, brillo/contraste y adapta capturas oscuras para Tesseract."""
     img = imagen.convert("RGB")
     w, h = img.size
-    if max(w, h) < 1600:
-        escala = 1600 / max(w, h)
+    if max(w, h) < 1800:
+        escala = 1800 / max(w, h)
         img = img.resize((int(w * escala), int(h * escala)), Image.Resampling.LANCZOS)
 
     gris = ImageOps.grayscale(img)
@@ -62,8 +65,8 @@ def preparar_imagen_ocr(imagen: Image.Image) -> Image.Image:
     if arr.mean() < 120:
         gris = ImageOps.invert(gris)
 
-    gris = ImageEnhance.Contrast(gris).enhance(1.65)
-    gris = ImageEnhance.Sharpness(gris).enhance(1.55)
+    gris = ImageEnhance.Contrast(gris).enhance(1.7)
+    gris = ImageEnhance.Sharpness(gris).enhance(1.6)
     return gris
 
 
@@ -176,8 +179,8 @@ def extraer_cuotas_winamax(texto_ocr: str) -> dict[str, str | None]:
 
 def extraer_cuotas_over_under_25(texto_ocr: str) -> dict[str, float | None]:
     """
-    Extrae cuotas de +2.5 y -2.5 goles desde capturas de Winamax
-    ignorando la línea '2,5' y porcentajes.
+    Extrae cuotas de +2.5 y -2.5 goles exclusivamente desde el bloque/etiquetas
+    asociadas a 'Más de 2,5' y 'Menos de 2,5', sin mezclar otros mercados.
     """
     cuota_over: float | None = None
     cuota_under: float | None = None
@@ -202,7 +205,7 @@ def extraer_cuotas_over_under_25(texto_ocr: str) -> dict[str, float | None]:
         candidatos: list[float] = []
         for m in re.finditer(r"(?<!\d)\d+\.\d{1,2}(?!\d)", sin_linea_25):
             val = float(m.group(0))
-            if 1.02 <= val <= 20.0:
+            if 1.05 <= val <= 15.0:
                 candidatos.append(round(val, 2))
 
         if candidatos:
@@ -210,25 +213,6 @@ def extraer_cuotas_over_under_25(texto_ocr: str) -> dict[str, float | None]:
                 cuota_over = candidatos[0]
             if es_under and cuota_under is None:
                 cuota_under = candidatos[0]
-
-    if cuota_over is None or cuota_under is None:
-        todos_decimales: list[float] = []
-        for l in lineas:
-            sin_25 = re.sub(r"\b2\.5\b", " ", l)
-            for m in re.finditer(r"(?<!\d)\d+\.\d{1,2}(?!\d)", sin_25):
-                val = float(m.group(0))
-                if 1.02 <= val <= 20.0:
-                    todos_decimales.append(round(val, 2))
-
-        if len(todos_decimales) >= 2:
-            if cuota_over is None:
-                cuota_over = todos_decimales[0]
-            if cuota_under is None:
-                cuota_under = (
-                    todos_decimales[1]
-                    if todos_decimales[1] != cuota_over
-                    else todos_decimales[-1]
-                )
 
     return {"cuota_over_25": cuota_over, "cuota_under_25": cuota_under}
 
