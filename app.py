@@ -21,6 +21,7 @@ API_BASE_URL = "https://v3.football.api-sports.io"
 GOAL_API_BASE_URL = "https://api.goal-api.com/v1"
 
 QUICK_PRESETS_GOAL = {
+    "Personalizado": ("", "", ""),
     "Walter Ferretti vs Sport Sébaco": ("Walter Ferretti", "Sport Sébaco", "Nicaragua"),
 }
 
@@ -935,9 +936,22 @@ for clave, valor_ini in {
     "api_warn_msg": "",
     "analisis_log": [],
     "ultimo_goal_analisis": None,
+    "goal_home_input": "Walter Ferretti",
+    "goal_away_input": "Sport Sébaco",
+    "goal_country_input": "Nicaragua",
+    "ultimo_ocr_goal_file": None,
 }.items():
     if clave not in st.session_state:
         st.session_state[clave] = valor_ini
+
+
+def _aplicar_preset_goal() -> None:
+    seleccion = st.session_state.get("goal_preset_select")
+    if seleccion in QUICK_PRESETS_GOAL and seleccion != "Personalizado":
+        h, a, c = QUICK_PRESETS_GOAL[seleccion]
+        st.session_state["goal_home_input"] = h
+        st.session_state["goal_away_input"] = a
+        st.session_state["goal_country_input"] = c
 
 
 st.title("⚽ Detector de Goles (+2.5 / -2.5)")
@@ -956,18 +970,54 @@ with tab_poisson:
     )
     goal_key_activa = obtener_goal_key(goal_key_manual)
 
-    preset = st.selectbox(
+    st.selectbox(
         "Acceso rápido",
-        options=["Personalizado"] + list(QUICK_PRESETS_GOAL.keys()),
+        options=list(QUICK_PRESETS_GOAL.keys()),
         index=1,
         key="goal_preset_select",
+        on_change=_aplicar_preset_goal,
     )
-    def_home, def_away, def_country = QUICK_PRESETS_GOAL.get(preset, ("", "", ""))
+
+    archivo_goal = st.file_uploader(
+        "Sube una captura del partido para sugerir los equipos en Poisson",
+        type=["png", "jpg", "jpeg", "webp"],
+        key="goal_ocr_uploader",
+    )
+    psm_goal = st.selectbox(
+        "Modo OCR (PSM)",
+        options=[6, 4, 11, 3],
+        index=0,
+        key="goal_ocr_psm",
+    )
+
+    if archivo_goal is not None:
+        img_bytes_g = archivo_goal.getvalue()
+        img_g = Image.open(BytesIO(img_bytes_g))
+        st.image(
+            img_g,
+            caption=f"Captura GOAL ({img_g.width}x{img_g.height} px)",
+            width="stretch",
+        )
+        try:
+            texto_ocr_g = ejecutar_ocr_bytes(img_bytes_g, psm=psm_goal)
+            loc_ocr_g, vis_ocr_g = sugerir_equipos_candidatos(texto_ocr_g)
+            marca_ocr = f"{archivo_goal.file_id}_{psm_goal}"
+            if st.session_state.get("ultimo_ocr_goal_file") != marca_ocr:
+                if loc_ocr_g:
+                    st.session_state["goal_home_input"] = loc_ocr_g
+                if vis_ocr_g:
+                    st.session_state["goal_away_input"] = vis_ocr_g
+                st.session_state["goal_country_input"] = ""
+                st.session_state["ultimo_ocr_goal_file"] = marca_ocr
+            with st.expander("Ver texto OCR detectado (GOAL API)"):
+                st.text(texto_ocr_g if texto_ocr_g.strip() else "No se detectó texto.")
+        except Exception as exc:
+            st.error(f"Error al ejecutar OCR: {exc}")
 
     gc1, gc2, gc3 = st.columns([2, 2, 1.5])
-    g_home_input = gc1.text_input("Equipo Local", value=def_home, key="goal_home_input")
-    g_away_input = gc2.text_input("Equipo Visitante", value=def_away, key="goal_away_input")
-    g_country_input = gc3.text_input("País (opcional)", value=def_country, key="goal_country_input")
+    g_home_input = gc1.text_input("Equipo Local", key="goal_home_input")
+    g_away_input = gc2.text_input("Equipo Visitante", key="goal_away_input")
+    g_country_input = gc3.text_input("País (opcional)", key="goal_country_input")
 
     gp1, gp2, gp3, gp4 = st.columns(4)
     g_last_n = gp1.slider("Últimos partidos", min_value=5, max_value=20, value=10, key="goal_last_n")
@@ -1061,6 +1111,7 @@ with tab_detector:
     archivo = st.file_uploader(
         "Sube una captura del partido para sugerir los equipos",
         type=["png", "jpg", "jpeg", "webp"],
+        key="detector_ocr_uploader",
     )
 
     with st.expander("Ajustes de API-Football, OCR y filtros"):
