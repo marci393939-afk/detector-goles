@@ -1,3 +1,4 @@
+
 import math
 import os
 import re
@@ -304,18 +305,26 @@ def goal_search_teams_cached(query: str, country: str | None, goal_key: str) -> 
     if not clean_query or not goal_key:
         return []
 
-    params: dict[str, str | int] = {"search": clean_query, "limit": 50}
-    if country and country.strip():
-        params["country"] = country.strip()
-
     resp = requests.get(
         f"{GOAL_API_BASE_URL}/teams",
         headers={"Authorization": f"Bearer {goal_key}"},
-        params=params,
+        params={"search": clean_query, "limit": 50},
         timeout=15,
     )
     resp.raise_for_status()
-    return resp.json().get("data", [])
+    items = resp.json().get("data", [])
+
+    if country and country.strip():
+        c_norm = normalizar_texto(country)
+        filtrados = [
+            t
+            for t in items
+            if c_norm in normalizar_texto(str(t.get("country") or t.get("countryName") or ""))
+        ]
+        if filtrados:
+            return filtrados
+
+    return items
 
 
 def goal_resolve_team(name: str, country: str | None, goal_key: str) -> dict | None:
