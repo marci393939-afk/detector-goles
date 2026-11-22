@@ -244,14 +244,13 @@ def evaluar_entrada_25(
             "p_under_25": round(p_under * 100, 1),
         }
 
-    mejor = max(opciones, key=lambda x: x["ev"])
+  mejor = max(opciones, key=lambda x: x["ev"])
     return {
         "decision": "APOSTAR",
         "mercado": mejor["mercado"],
         "cuota": mejor["cuota"],
         "prob_modelo": mejor["prob_modelo"],
-        "prob_im
-"prob_implicita": mejor["prob_implicita"],
+        "prob_implicita": mejor["prob_implicita"],
         "edge": mejor["edge"],
         "ev": mejor["ev"],
         "xg_total": probs["xg_total"],
