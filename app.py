@@ -207,4 +207,125 @@ def sugerir_equipos_candidatos(texto_ocr: str) -> tuple[str, str]:
             return palabras[0], palabras[1]
 
     fuente = candidatos_cruce if len(candidatos_cruce) >= 2 else equipos
-    local = fuente[0] if
+    local = fuente[0] if len(fuente) >= 1 else ""
+    visitante = fuente[1] if len(fuente) >= 2 else ""
+    return local, visitante
+
+
+def calcular_xg_moderado(
+    gf_local_10: float,
+    gc_local_10: float,
+    gf_vis_10: float,
+    gc_vis_10: float,
+    goles_h2h_prom: float | None = None,
+    peso_h2h: float = 0.15,
+) -> tuple[float, float]:
+    """
+    Calcula goles esperados moderando extremos con medias de 10 partidos
+    y un peso ligero opcional de enfrentamientos directos (H2H).
+    """
+    gf_l = min(max(gf_local_10, 0.15), 4.2)
+    gc_l = min(max(gc_local_10, 0.15), 4.2)
+    gf_v = min(max(gf_vis_10, 0.15), 4.2)
+    gc_v = min(max(gc_vis_10, 0.15), 4.2)
+
+    xg_local = (gf_l + gc_v) / 2.0
+    xg_visitante = (gf_v + gc_l) / 2.0
+
+    if goles_h2h_prom is not None and goles_h2h_prom > 0:
+        h2h_mod = min(max(goles_h2h_prom, 0.4), 5.5)
+        total_base = xg_local + xg_visitante
+        total_ajustado = ((1.0 - peso_h2h) * total_base) + (peso_h2h * h2h_mod)
+        if total_base > 0:
+            factor = total_ajustado / total_base
+            xg_local *= factor
+            xg_visitante *= factor
+
+    return round(max(0.15, xg_local), 2), round(max(0.15, xg_visitante), 2)
+
+
+def poisson_pmf(k: int, lam: float) -> float:
+    return (math.exp(-lam) * (lam ** k)) / math.factorial(k)
+
+
+def probs_over_under_25(xg_local: float, xg_visitante: float) -> dict[str, float]:
+    """Calcula P(-2.5) y P(+2.5) sumando probabilidades de goles totales 0, 1 y 2."""
+    total_xg = max(0.05, xg_local + xg_visitante)
+    p_0 = poisson_pmf(0, total_xg)
+    p_1 = poisson_pmf(1, total_xg)
+    p_2 = poisson_pmf(2, total_xg)
+
+    p_under_25 = min(0.99, max(0.01, p_0 + p_1 + p_2))
+    p_over_25 = 1.0 - p_under_25
+
+    return {
+        "xg_total": round(total_xg, 2),
+        "p_under_25": p_under_25,
+        "p_over_25": p_over_25,
+    }
+
+
+def evaluar_entrada_25(
+    xg_local: float,
+    xg_visitante: float,
+    cuota_over_25: float | None = None,
+    cuota_under_25: float | None = None,
+    min_edge: float = 0.035,
+    min_cuota_over: float = 1.45,
+    min_cuota_under: float = 1.35,
+) -> dict:
+    """Evalúa +2.5 y -2.5 goles exigiendo ventaja mínima sobre la cuota."""
+    probs = probs_over_under_25(xg_local, xg_visitante)
+    p_over = probs["p_over_25"]
+    p_under = probs["p_under_25"]
+
+    opciones = []
+    desglose = []
+
+    if cuota_over_25 and cuota_over_25 > 1.0:
+        imp_over = 1.0 / cuota_over_25
+        edge_over = p_over - imp_over
+        ev_over = (p_over * cuota_over_25) - 1.0
+        pasa_over = edge_over >= min_edge and cuota_over_25 >= min_cuota_over
+        desglose.append(
+            {
+                "Mercado": "+2.5 goles",
+                "Cuota": f"{cuota_over_25:.2f}",
+                "Prob. modelo": f"{p_over * 100:.1f}%",
+                "Prob. implícita": f"{imp_over * 100:.1f}%",
+                "Ventaja": f"{edge_over * 100:+.1f}%",
+                "Filtro": "OK" if pasa_over else "No",
+            }
+        )
+        if pasa_over:
+            opciones.append(
+                {
+                    "mercado": "+2.5 goles",
+                    "cuota": cuota_over_25,
+                    "prob_modelo": round(p_over * 100, 1),
+                    "prob_implicita": round(imp_over * 100, 1),
+                    "edge": round(edge_over * 100, 1),
+                    "ev": round(ev_over, 3),
+                }
+            )
+
+    if cuota_under_25 and cuota_under_25 > 1.0:
+        imp_under = 1.0 / cuota_under_25
+        edge_under = p_under - imp_under
+        ev_under = (p_under * cuota_under_25) - 1.0
+        pasa_under = edge_under >= min_edge and cuota_under_25 >= min_cuota_under
+        desglose.append(
+            {
+                "Mercado": "-2.5 goles",
+                "Cuota": f"{cuota_under_25:.2f}",
+                "Prob. modelo": f"{p_under * 100:.1f}%",
+                "Prob. implícita": f"{imp_under * 100:.1f}%",
+                "Ventaja": f"{edge_under * 100:+.1f}%",
+                "Filtro": "OK" if pasa_under else "No",
+            }
+        )
+        if pasa_under:
+            opciones.append(
+                {
+                    "mercado": "-2.5 goles",
+                    "cuota": cuota_under_25,
