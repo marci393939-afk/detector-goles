@@ -244,7 +244,7 @@ def evaluar_entrada_25(
             "p_under_25": round(p_under * 100, 1),
         }
 
-  mejor = max(opciones, key=lambda x: x["ev"])
+    mejor = max(opciones, key=lambda x: x["ev"])
     return {
         "decision": "APOSTAR",
         "mercado": mejor["mercado"],
@@ -333,73 +333,4 @@ with c_over:
     )
 with c_under:
     usar_under = st.checkbox("Evaluar -2.5 goles", value=True)
-    cuota_under_25 = st.number_input(
-        "Cuota -2.5 (Winamax)",
-        min_value=1.01,
-        max_value=20.00,
-        value=1.95,
-        step=0.01,
-        format="%.2f",
-        disabled=not usar_under,
-    )
-
-# 3. Medias de 10 partidos y H2H
-st.subheader("3. Promedios (últimos 10 partidos y H2H)")
-m1, m2 = st.columns(2)
-with m1:
-    gf_local_10 = st.number_input(
-        "Goles a favor Local (prom. 10)", min_value=0.0, max_value=6.0, value=1.40, step=0.05
-    )
-    gc_local_10 = st.number_input(
-        "Goles en contra Local (prom. 10)", min_value=0.0, max_value=6.0, value=1.10, step=0.05
-    )
-with m2:
-    gf_vis_10 = st.number_input(
-        "Goles a favor Visitante (prom. 10)", min_value=0.0, max_value=6.0, value=1.20, step=0.05
-    )
-    gc_vis_10 = st.number_input(
-        "Goles en contra Visitante (prom. 10)", min_value=0.0, max_value=6.0, value=1.20, step=0.05
-    )
-
-usar_h2h = st.checkbox("Incluir promedio de goles en H2H", value=False)
-goles_h2h_prom = None
-if usar_h2h:
-    goles_h2h_prom = st.number_input(
-        "Promedio goles totales H2H", min_value=0.0, max_value=8.0, value=2.40, step=0.10
-    )
-
-# 4. Evaluación y decisión
-st.subheader("4. Análisis del modelo")
-if st.button("Calcular recomendación", type="primary"):
-    xg_l, xg_v = calcular_xg_moderado(
-        gf_local_10=gf_local_10,
-        gc_local_10=gc_local_10,
-        gf_vis_10=gf_vis_10,
-        gc_vis_10=gc_vis_10,
-        goles_h2h_prom=goles_h2h_prom,
-    )
-
-    resultado = evaluar_entrada_25(
-        xg_local=xg_l,
-        xg_visitante=xg_v,
-        cuota_over_25=cuota_over_25 if usar_over else None,
-        cuota_under_25=cuota_under_25 if usar_under else None,
-        min_edge=min_edge_pct / 100.0,
-        min_cuota_over=min_cuota_over,
-    )
-
-    partido_label = f"{equipo_local or 'Local'} vs {equipo_visitante or 'Visitante'}"
-    st.markdown(f"**Partido:** {partido_label}")
-
-    r1, r2, r3 = st.columns(3)
-    r1.metric("Goles esperados (xG)", f"{resultado['xg_total']:.2f}")
-    r2.metric("Prob. +2.5 goles", f"{resultado['p_over_25']:.1f}%")
-    r3.metric("Prob. -2.5 goles", f"{resultado['p_under_25']:.1f}%")
-
-    if resultado["decision"] == "APOSTAR":
-        st.success(
-            f"✅ **APOSTAR — {resultado['mercado']}** a cuota **{resultado['cuota']:.2f}** | "
-            f"Ventaja: **+{resultado['edge']:.1f}%** | EV: **{resultado['ev']:+.3f}**"
-        )
-    else:
-        st.warning(f"⛔ **NO APOSTAR** — {resultado['motivo']}")
+    cuota_under_
