@@ -227,4 +227,4 @@ def calcular_xg_moderado(
     """
     gf_l = min(max(gf_local_10, 0.15), 4.2)
     gc_l = min(max(gc_local_10, 0.15), 4.2)
-    gf_v = min(max(gf_
+    gf_v = min(max(
