@@ -45,6 +45,8 @@ PALABRAS_RUIDO = {
     "PREMIER LEAGUE",
     "HANDICAP ASIATICO",
     "HACER UNA APUESTA",
+    "CASA DE APUESTAS",
+    "DOBLE OPORTUNID",
 }
 
 
@@ -72,9 +74,11 @@ def ejecutar_ocr_bytes(img_bytes: bytes, psm: int = 6) -> str:
 
 
 def _es_token_basura_ocr(token: str) -> bool:
-    """Detecta tokens cortos deformados típicos de iconos mal leídos (ej. 'ESgsS', '_ ad')."""
+    """Detecta tokens cortos deformados o repeticiones sin sentido (ej. 'eee', 'ESgsS')."""
     limpio = re.sub(r"[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ]", "", token)
     if len(limpio) < 2:
+        return True
+    if len(set(limpio.lower())) == 1:
         return True
     if len(limpio) <= 6 and re.search(r"[A-Z]{2,}[a-z]+[A-Z]|[a-z]+[A-Z]{2,}", limpio):
         return True
@@ -124,22 +128,23 @@ def limpiar_lineas_ocr(texto_ocr: str) -> list[str]:
 
 
 def extraer_cuotas_winamax(texto_ocr: str) -> dict[str, str | None]:
-    """Busca la fila de WINAMAX y extrae las cuotas 1, X y 2."""
+    """Busca la fila de WINAMAX y extrae las cuotas 1, X y 2 ignorando porcentajes."""
     for linea in texto_ocr.splitlines():
         if "WINAMAX" in linea.upper():
-            normalizada = linea.replace(",", ".")
+            sin_porcentajes = re.sub(r"\d+(?:[.,]\d+)?\s*%", " ", linea)
+            normalizada = sin_porcentajes.replace(",", ".")
             cuotas: list[str] = []
 
             for match in re.finditer(r"(?<!\d)\d+\.\d{1,2}(?!\d)", normalizada):
                 val = float(match.group(0))
-                if 1.05 <= val <= 25.0:
+                if 1.15 <= val <= 12.0:
                     cuotas.append(f"{val:.2f}")
 
             if len(cuotas) < 3:
                 for match in re.finditer(r"(?<!\d)\d{3}(?!\d)", normalizada):
                     val = int(match.group(0)) / 100.0
                     texto_val = f"{val:.2f}"
-                    if 1.05 <= val <= 25.0 and len(cuotas) < 3:
+                    if 1.15 <= val <= 12.0 and len(cuotas) < 3:
                         cuotas.append(texto_val)
 
             if len(cuotas) >= 3:
@@ -167,10 +172,13 @@ def extraer_cuotas_winamax(texto_ocr: str) -> dict[str, str | None]:
 
 
 def _extraer_equipos_de_linea(linea: str) -> list[str]:
-    partes = re.split(r"\s*(?:>|\bvs\.?\b|\s-\s)\s*", linea, flags=re.IGNORECASE)
+    partes = re.split(
+        r"\s*(?:>|\bvs\.?\b|\s-\s|\d{1,2}:\d{2})\s*", linea, flags=re.IGNORECASE
+    )
     encontrados: list[str] = []
     for parte in partes:
-        limpia_parte = parte.strip(" -|>/\\")
+        limpia_parte = re.sub(r"\b\d+\b", "", parte).strip(" -|>/\\")
+        limpia_parte = re.sub(r"\s+", " ", limpia_parte).strip()
         if limpia_parte.isupper() and len(limpia_parte) <= 4:
             continue
         if _es_token_basura_ocr(limpia_parte):
@@ -181,7 +189,7 @@ def _extraer_equipos_de_linea(linea: str) -> list[str]:
 
 
 def sugerir_equipos_candidatos(texto_ocr: str) -> tuple[str, str]:
-    """Sugiere equipo local y visitante priorizando líneas con separador de cruce ('>' o 'vs')."""
+    """Sugiere equipo local y visitante priorizando líneas con cruce, marcador o 'vs'."""
     lineas = limpiar_lineas_ocr(texto_ocr)
     candidatos_cruce: list[str] = []
     equipos: list[str] = []
@@ -191,11 +199,18 @@ def sugerir_equipos_candidatos(texto_ocr: str) -> tuple[str, str]:
             continue
         if re.search(r"[|{}~<>\\]", linea) and ">" not in linea:
             continue
-        if re.search(r"\d", linea):
+
+        es_cruce = bool(
+            ">" in linea
+            or re.search(r"\bvs\.?\b", linea, flags=re.IGNORECASE)
+            or re.search(r"\b\d{1,2}:\d{2}\b", linea)
+        )
+
+        if not es_cruce and re.search(r"\d", linea):
             continue
 
         partes_linea = _extraer_equipos_de_linea(linea)
-        if ">" in linea or re.search(r"\bvs\.?\b", linea, flags=re.IGNORECASE):
+        if es_cruce and len(partes_linea) >= 2:
             for eq in partes_linea:
                 if eq not in candidatos_cruce:
                     candidatos_cruce.append(eq)
