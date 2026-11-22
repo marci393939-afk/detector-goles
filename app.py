@@ -2,6 +2,7 @@ import math
 import re
 from io import BytesIO
 
+import numpy as np
 from PIL import Image, ImageEnhance, ImageOps
 import pytesseract
 import streamlit as st
@@ -27,8 +28,6 @@ PALABRAS_RUIDO = {
     "PREPARTIDO",
     "PROXIMO GOL",
     "MAS DE/MENOS DE",
-    "MAS DE",
-    "MENOS DE",
     "AMBOS",
     "FLASHSCORE",
     "PARTIDO",
@@ -51,7 +50,7 @@ PALABRAS_RUIDO = {
 
 
 def preparar_imagen_ocr(imagen: Image.Image) -> Image.Image:
-    """Mejora contraste y escala la imagen para facilitar la lectura de Tesseract."""
+    """Mejora escala, brillo/contraste y adapta capturas oscuras para Tesseract."""
     img = imagen.convert("RGB")
     w, h = img.size
     if max(w, h) < 1600:
@@ -59,8 +58,12 @@ def preparar_imagen_ocr(imagen: Image.Image) -> Image.Image:
         img = img.resize((int(w * escala), int(h * escala)), Image.Resampling.LANCZOS)
 
     gris = ImageOps.grayscale(img)
-    gris = ImageEnhance.Contrast(gris).enhance(1.5)
-    gris = ImageEnhance.Sharpness(gris).enhance(1.4)
+    arr = np.asarray(gris, dtype=np.float32)
+    if arr.mean() < 115:
+        gris = ImageOps.invert(gris)
+
+    gris = ImageEnhance.Contrast(gris).enhance(1.6)
+    gris = ImageEnhance.Sharpness(gris).enhance(1.5)
     return gris
 
 
@@ -74,7 +77,7 @@ def ejecutar_ocr_bytes(img_bytes: bytes, psm: int = 6) -> str:
 
 
 def _es_token_basura_ocr(token: str) -> bool:
-    """Detecta tokens cortos deformados o repeticiones sin sentido (ej. 'eee', 'ESgsS')."""
+    """Detecta tokens cortos deformados o repeticiones sin sentido."""
     limpio = re.sub(r"[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ]", "", token)
     if len(limpio) < 2:
         return True
@@ -169,6 +172,55 @@ def extraer_cuotas_winamax(texto_ocr: str) -> dict[str, str | None]:
                 }
 
     return {"cuota_1": None, "cuota_x": None, "cuota_2": None}
+
+
+def extraer_cuotas_over_under_25(texto_ocr: str) -> dict[str, float | None]:
+    """
+    Extrae cuotas de +2.5 y -2.5 goles desde capturas de Winamax
+    (ej. 'Más de 2,5' -> 1,29 y 'Menos de 2,5' -> 3,30).
+    """
+    cuota_over: float | None = None
+    cuota_under: float | None = None
+
+    normal = texto_ocr.replace(",", ".")
+    lineas = [ln.strip() for ln in normal.splitlines() if ln.strip()]
+
+    for idx, linea in enumerate(lineas):
+        up = linea.upper()
+        es_over = bool(re.search(r"(?:M[AÁ]S DE|\+)\s*2\.5", up))
+        es_under = bool(re.search(r"(?:MENOS DE|-)\s*2\.5", up))
+
+        if not es_over and not es_under:
+            continue
+
+        ventana = " ".join(lineas[idx : min(len(lineas), idx + 3)])
+        sin_linea_25 = re.sub(r"(?:M[AÁ]S DE|MENOS DE|\+|-)?\s*2\.5", " ", ventana, flags=re.IGNORECASE)
+
+        candidatos: list[float] = []
+        for m in re.finditer(r"(?<!\d)\d+\.\d{1,2}(?!\d)", sin_linea_25):
+            val = float(m.group(0))
+            if 1.02 <= val <= 20.0:
+                candidatos.append(round(val, 2))
+
+        if candidatos:
+            if es_over and cuota_over is None:
+                cuota_over = candidatos[0]
+            if es_under and cuota_under is None:
+                cuota_under = candidatos[0]
+
+    if cuota_over is None and cuota_under is None and any("GOLES" in l.upper() for l in lineas):
+        todos = []
+        for l in lineas:
+            if "2.5" in l:
+                continue
+            for m in re.finditer(r"(?<!\d)\d+\.\d{2}(?!\d)", l):
+                val = float(m.group(0))
+                if 1.02 <= val <= 20.0:
+                    todos.append(round(val, 2))
+        if len(todos) >= 2:
+            cuota_over, cuota_under = todos[0], todos[1]
+
+    return {"cuota_over_25": cuota_over, "cuota_under_25": cuota_under}
 
 
 def _extraer_equipos_de_linea(linea: str) -> list[str]:
@@ -425,6 +477,7 @@ texto_ocr = ""
 local_sugerido = ""
 visitante_sugerido = ""
 cuotas_winamax = {"cuota_1": None, "cuota_x": None, "cuota_2": None}
+cuotas_25_ocr = {"cuota_over_25": None, "cuota_under_25": None}
 partido_detectado = False
 
 if archivo is not None:
@@ -443,7 +496,13 @@ if archivo is not None:
         texto_ocr = ejecutar_ocr_bytes(img_bytes, psm=psm)
         local_sugerido, visitante_sugerido = sugerir_equipos_candidatos(texto_ocr)
         cuotas_winamax = extraer_cuotas_winamax(texto_ocr)
-        partido_detectado = bool(local_sugerido or visitante_sugerido)
+        cuotas_25_ocr = extraer_cuotas_over_under_25(texto_ocr)
+        partido_detectado = bool(
+            local_sugerido
+            or visitante_sugerido
+            or cuotas_25_ocr["cuota_over_25"]
+            or cuotas_25_ocr["cuota_under_25"]
+        )
     except Exception as exc:
         st.error(f"Error al ejecutar OCR: {exc}")
 
@@ -463,6 +522,20 @@ if any(v is not None for v in cuotas_winamax.values()):
         f"{cuotas_winamax['cuota_1'] or '-'} / {cuotas_winamax['cuota_x'] or '-'} / {cuotas_winamax['cuota_2'] or '-'}"
     )
 
+if cuotas_25_ocr["cuota_over_25"] is not None or cuotas_25_ocr["cuota_under_25"] is not None:
+    st.info(
+        f"Goles detectados en captura (+2.5 / -2.5): "
+        f"{cuotas_25_ocr['cuota_over_25'] if cuotas_25_ocr['cuota_over_25'] is not None else '-'} / "
+        f"{cuotas_25_ocr['cuota_under_25'] if cuotas_25_ocr['cuota_under_25'] is not None else '-'}"
+    )
+
+valor_over_def = (
+    cuotas_25_ocr["cuota_over_25"] if cuotas_25_ocr["cuota_over_25"] is not None else 1.85
+)
+valor_under_def = (
+    cuotas_25_ocr["cuota_under_25"] if cuotas_25_ocr["cuota_under_25"] is not None else 1.95
+)
+
 c_over, c_under = st.columns(2)
 with c_over:
     usar_over = st.checkbox("Evaluar +2.5 goles", value=True)
@@ -470,7 +543,7 @@ with c_over:
         "Cuota +2.5 (Winamax)",
         min_value=1.01,
         max_value=20.00,
-        value=1.85,
+        value=float(valor_over_def),
         step=0.01,
         format="%.2f",
         disabled=not usar_over,
@@ -481,7 +554,7 @@ with c_under:
         "Cuota -2.5 (Winamax)",
         min_value=1.01,
         max_value=20.00,
-        value=1.95,
+        value=float(valor_under_def),
         step=0.01,
         format="%.2f",
         disabled=not usar_under,
