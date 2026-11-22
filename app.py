@@ -207,38 +207,4 @@ def sugerir_equipos_candidatos(texto_ocr: str) -> tuple[str, str]:
             return palabras[0], palabras[1]
 
     fuente = candidatos_cruce if len(candidatos_cruce) >= 2 else equipos
-    local = fuente[0] if len(fuente) >= 1 else ""
-    visitante = fuente[1] if len(fuente) >= 2 else ""
-    return local, visitante
-
-
-def calcular_xg_moderado(
-    gf_local_10: float,
-    gc_local_10: float,
-    gf_vis_10: float,
-    gc_vis_10: float,
-    goles_h2h_prom: float | None = None,
-    peso_h2h: float = 0.15,
-) -> tuple[float, float]:
-    """
-    Calcula goles esperados moderando extremos con medias de 10 partidos
-    y un peso ligero opcional de enfrentamientos directos (H2H).
-    """
-    gf_l = min(max(gf_local_10, 0.15), 4.2)
-    gc_l = min(max(gc_local_10, 0.15), 4.2)
-    gf_v = min(max(gf_vis_10, 0.15), 4.2)
-    gc_v = min(max(gc_vis_10, 0.15), 4.2)
-
-    xg_local = (gf_l + gc_v) / 2.0
-    xg_visitante = (gf_v + gc_l) / 2.0
-
-    if goles_h2h_prom is not None and goles_h2h_prom > 0:
-        h2h_mod = min(max(goles_h2h_prom, 0.4), 5.5)
-        total_base = xg_local + xg_visitante
-        total_ajustado = ((1.0 - peso_h2h) * total_base) + (peso_h2h * h2h_mod)
-        if total_base > 0:
-            factor = total_ajustado / total_base
-            xg_local *= factor
-            xg_visitante *= factor
-
-    return round(max(0
+    local = fuente[0] if
