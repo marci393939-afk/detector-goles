@@ -152,6 +152,10 @@ def api_get(endpoint: str, params_items: tuple[tuple[str, str], ...], api_key: s
     return resp.json()
 
 
+def _fecha_partido(fixture_item: dict) -> str:
+    return str(fixture_item.get("fixture", {}).get("date") or "")
+
+
 def buscar_equipo_api(nombre: str, api_key: str) -> dict | None:
     consulta = preparar_nombre_busqueda(nombre)
     data = api_get("teams", (("search", consulta),), api_key)
@@ -162,6 +166,9 @@ def buscar_equipo_api(nombre: str, api_key: str) -> dict | None:
     resultados = data.get("response", [])
     if not resultados and consulta != nombre.strip():
         data = api_get("teams", (("search", nombre.strip()),), api_key)
+        errores = data.get("errors")
+        if errores:
+            raise RuntimeError(str(errores))
         resultados = data.get("response", [])
 
     if not resultados:
@@ -182,24 +189,32 @@ def buscar_equipo_api(nombre: str, api_key: str) -> dict | None:
 
 
 def obtener_promedios_10_api(team_id: int, api_key: str) -> dict | None:
-    data = api_get(
-        "fixtures",
-        (("team", str(team_id)), ("last", "10"), ("status", "FT")),
-        api_key,
-    )
-    errores = data.get("errors")
-    if errores:
-        raise RuntimeError(str(errores))
+    partidos: list[dict] = []
+    for temporada in ("2026", "2025"):
+        data = api_get(
+            "fixtures",
+            (("team", str(team_id)), ("season", temporada), ("status", "FT")),
+            api_key,
+        )
+        errores = data.get("errors")
+        if errores:
+            raise RuntimeError(str(errores))
+        lote = data.get("response", [])
+        if lote:
+            partidos.extend(lote)
+        if len(partidos) >= 10:
+            break
 
-    partidos = data.get("response", [])
     if not partidos:
         return None
+
+    partidos_ordenados = sorted(partidos, key=_fecha_partido, reverse=True)[:10]
 
     gf_total = 0
     gc_total = 0
     validos = 0
 
-    for f in partidos:
+    for f in partidos_ordenados:
         teams = f.get("teams", {})
         goals = f.get("goals", {})
         home_id = teams.get("home", {}).get("id")
@@ -232,7 +247,7 @@ def obtener_promedios_10_api(team_id: int, api_key: str) -> dict | None:
 def obtener_h2h_api(team_local_id: int, team_vis_id: int, api_key: str) -> dict | None:
     data = api_get(
         "fixtures/headtohead",
-        (("h2h", f"{team_local_id}-{team_vis_id}"), ("last", "6"), ("status", "FT")),
+        (("h2h", f"{team_local_id}-{team_vis_id}"), ("status", "FT")),
         api_key,
     )
     errores = data.get("errors")
@@ -240,9 +255,14 @@ def obtener_h2h_api(team_local_id: int, team_vis_id: int, api_key: str) -> dict 
         return None
 
     partidos = data.get("response", [])
+    if not partidos:
+        return None
+
+    partidos_ordenados = sorted(partidos, key=_fecha_partido, reverse=True)[:6]
+
     total_goles = 0
     validos = 0
-    for f in partidos:
+    for f in partidos_ordenados:
         goals = f.get("goals", {})
         g_home = goals.get("home")
         g_away = goals.get("away")
@@ -677,7 +697,7 @@ def actualizar_estadisticas_desde_api(loc: str, vis: str, key: str) -> None:
 
         if not stats_l or not stats_v:
             st.session_state["api_warn_msg"] = (
-                "API-Football no devolvió últimos 10 partidos (puede ser una restricción de temporada del plan gratuito)."
+                "API-Football no devolvió partidos finalizados recientes para uno de los equipos."
             )
             return
 
