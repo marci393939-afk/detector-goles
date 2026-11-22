@@ -59,11 +59,11 @@ def preparar_imagen_ocr(imagen: Image.Image) -> Image.Image:
 
     gris = ImageOps.grayscale(img)
     arr = np.asarray(gris, dtype=np.float32)
-    if arr.mean() < 115:
+    if arr.mean() < 120:
         gris = ImageOps.invert(gris)
 
-    gris = ImageEnhance.Contrast(gris).enhance(1.6)
-    gris = ImageEnhance.Sharpness(gris).enhance(1.5)
+    gris = ImageEnhance.Contrast(gris).enhance(1.65)
+    gris = ImageEnhance.Sharpness(gris).enhance(1.55)
     return gris
 
 
@@ -177,12 +177,13 @@ def extraer_cuotas_winamax(texto_ocr: str) -> dict[str, str | None]:
 def extraer_cuotas_over_under_25(texto_ocr: str) -> dict[str, float | None]:
     """
     Extrae cuotas de +2.5 y -2.5 goles desde capturas de Winamax
-    (ej. 'Más de 2,5' -> 1,29 y 'Menos de 2,5' -> 3,30).
+    ignorando la línea '2,5' y porcentajes.
     """
     cuota_over: float | None = None
     cuota_under: float | None = None
 
-    normal = texto_ocr.replace(",", ".")
+    sin_pct = re.sub(r"\d+(?:[.,]\d+)?\s*%", " ", texto_ocr)
+    normal = sin_pct.replace(",", ".")
     lineas = [ln.strip() for ln in normal.splitlines() if ln.strip()]
 
     for idx, linea in enumerate(lineas):
@@ -194,7 +195,9 @@ def extraer_cuotas_over_under_25(texto_ocr: str) -> dict[str, float | None]:
             continue
 
         ventana = " ".join(lineas[idx : min(len(lineas), idx + 3)])
-        sin_linea_25 = re.sub(r"(?:M[AÁ]S DE|MENOS DE|\+|-)?\s*2\.5", " ", ventana, flags=re.IGNORECASE)
+        sin_linea_25 = re.sub(
+            r"(?:M[AÁ]S DE|MENOS DE|\+|-)?\s*2\.5", " ", ventana, flags=re.IGNORECASE
+        )
 
         candidatos: list[float] = []
         for m in re.finditer(r"(?<!\d)\d+\.\d{1,2}(?!\d)", sin_linea_25):
@@ -208,17 +211,24 @@ def extraer_cuotas_over_under_25(texto_ocr: str) -> dict[str, float | None]:
             if es_under and cuota_under is None:
                 cuota_under = candidatos[0]
 
-    if cuota_over is None and cuota_under is None and any("GOLES" in l.upper() for l in lineas):
-        todos = []
+    if cuota_over is None or cuota_under is None:
+        todos_decimales: list[float] = []
         for l in lineas:
-            if "2.5" in l:
-                continue
-            for m in re.finditer(r"(?<!\d)\d+\.\d{2}(?!\d)", l):
+            sin_25 = re.sub(r"\b2\.5\b", " ", l)
+            for m in re.finditer(r"(?<!\d)\d+\.\d{1,2}(?!\d)", sin_25):
                 val = float(m.group(0))
                 if 1.02 <= val <= 20.0:
-                    todos.append(round(val, 2))
-        if len(todos) >= 2:
-            cuota_over, cuota_under = todos[0], todos[1]
+                    todos_decimales.append(round(val, 2))
+
+        if len(todos_decimales) >= 2:
+            if cuota_over is None:
+                cuota_over = todos_decimales[0]
+            if cuota_under is None:
+                cuota_under = (
+                    todos_decimales[1]
+                    if todos_decimales[1] != cuota_over
+                    else todos_decimales[-1]
+                )
 
     return {"cuota_over_25": cuota_over, "cuota_under_25": cuota_under}
 
@@ -536,6 +546,9 @@ valor_under_def = (
     cuotas_25_ocr["cuota_under_25"] if cuotas_25_ocr["cuota_under_25"] is not None else 1.95
 )
 
+key_over = f"over_{archivo.file_id}" if archivo is not None else "over_default"
+key_under = f"under_{archivo.file_id}" if archivo is not None else "under_default"
+
 c_over, c_under = st.columns(2)
 with c_over:
     usar_over = st.checkbox("Evaluar +2.5 goles", value=True)
@@ -547,6 +560,7 @@ with c_over:
         step=0.01,
         format="%.2f",
         disabled=not usar_over,
+        key=key_over,
     )
 with c_under:
     usar_under = st.checkbox("Evaluar -2.5 goles", value=True)
@@ -558,6 +572,7 @@ with c_under:
         step=0.01,
         format="%.2f",
         disabled=not usar_under,
+        key=key_under,
     )
 
 st.subheader("3. Promedios (últimos 10 partidos y H2H)")
