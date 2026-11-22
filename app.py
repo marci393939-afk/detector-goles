@@ -324,8 +324,14 @@ def evaluar_entrada_25(
                 "Filtro": "OK" if pasa_under else "No",
             }
         )
-        if pasa_under:
+       if pasa_under:
             opciones.append(
-                cuotas_winamax = {"cuota_1": None, "cuota_x": None, "cuota_2": None}
+                {
                     "mercado": "-2.5 goles",
                     "cuota": cuota_under_25,
+                    "prob_modelo": round(p_under * 100, 1),
+                    "prob_implicita": round(imp_under * 100, 1),
+                    "edge": round(edge_under * 100, 1),
+                    "ev": round(ev_under, 3),
+                }
+            )
