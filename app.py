@@ -772,29 +772,48 @@ def _separar_dos_equipos_en_linea(texto: str) -> list[str]:
     }
 
     palabras = limpio.split()
-    if len(palabras) >= 2:
-        for idx in range(1, len(palabras)):
-            izq = " ".join(palabras[:idx]).strip()
-            der = " ".join(palabras[idx:]).strip()
-            tok_izq = re.sub(r"[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ]", "", palabras[idx - 1]).lower()
-            tok_der = re.sub(r"[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ]", "", palabras[idx]).lower()
+    n = len(palabras)
+    if n < 2:
+        return [limpio]
 
-            if (
-                len(izq) >= 3
-                and len(der) >= 3
-                and not _es_token_basura_ocr(izq)
-                and not _es_token_basura_ocr(der)
-                and (
-                    tok_izq in sufijos_club
-                    or tok_der in {"fc", "cf", "cd", "ud", "sc", "ac", "real", "sporting", "club"}
-                    or (
-                        len(palabras) in (2, 3, 4)
-                        and all(re.match(r"^[A-ZÁÉÍÓÚÜÑ]", p) for p in palabras)
-                        and idx in (1, 2)
-                    )
-                )
-            ):
-                return [izq, der]
+    if n >= 4 and all(re.match(r"^[A-ZÁÉÍÓÚÜÑ]", p) for p in palabras):
+        mitad = n // 2
+        izq = " ".join(palabras[:mitad]).strip()
+        der = " ".join(palabras[mitad:]).strip()
+        if len(izq) >= 3 and len(der) >= 3:
+            return [izq, der]
+
+    for idx in range(1, n):
+        izq = " ".join(palabras[:idx]).strip()
+        der = " ".join(palabras[idx:]).strip()
+        tok_izq = re.sub(r"[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ]", "", palabras[idx - 1]).lower()
+        tok_der = re.sub(r"[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ]", "", palabras[idx]).lower()
+
+        es_corte_club = tok_izq in sufijos_club or tok_der in {
+            "fc",
+            "cf",
+            "cd",
+            "ud",
+            "sc",
+            "ac",
+            "real",
+            "sporting",
+            "club",
+        }
+        es_corte_par = (
+            n in (2, 3)
+            and all(re.match(r"^[A-ZÁÉÍÓÚÜÑ]", p) for p in palabras)
+            and idx == 1
+        )
+
+        if (
+            len(izq) >= 3
+            and len(der) >= 3
+            and not _es_token_basura_ocr(izq)
+            and not _es_token_basura_ocr(der)
+            and (es_corte_club or es_corte_par)
+        ):
+            return [izq, der]
 
     return [limpio]
 
