@@ -146,6 +146,8 @@ PALABRAS_RUIDO = {
     "ARMENIA",
     "UCRANIA",
     "KENIA",
+    "BRASIL",
+    "ALERT",
     "ESPANA",
     "ESPAÑA",
     "INGLATERRA",
@@ -806,7 +808,9 @@ def _es_candidato_equipo_valido(candidato: str) -> bool:
     if letras < 4:
         return False
     minus = [normalizar_texto(p) for p in palabras]
-    if set(minus).issubset({"solo", "para", "nue", "fo", "ussun", "con", "del", "las", "los", "war"}):
+    if set(minus).issubset(
+        {"solo", "para", "nue", "fo", "ussun", "con", "del", "las", "los", "war", "alert"}
+    ):
         return False
     return True
 
@@ -1279,7 +1283,7 @@ with tab_poisson:
 
     go1, go2, go3 = st.columns(3)
     g_cuota_x = go1.number_input(
-        "Cuota Empate (X) Winamax", min_value=1.01, max_value=15.0, value=2.90, step=0.05, key="goal_cuota_x"
+        "Cuota Empate (X) Winamax", min_value=1.01, max_value=15.0, value=3.90, step=0.05, key="goal_cuota_x"
     )
     g_cuota_o25 = go2.number_input(
         "Cuota Over 2.5 Winamax", min_value=1.01, max_value=10.0, value=2.80, step=0.05, key="goal_cuota_o25"
