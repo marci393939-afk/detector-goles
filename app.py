@@ -143,6 +143,14 @@ PALABRAS_RUIDO = {
     "PREMIER LEAGUE",
     "FIRST LEAGUE",
     "ARMENIA",
+    "UCRANIA",
+    "ESPANA",
+    "ESPAÑA",
+    "INGLATERRA",
+    "FRANCIA",
+    "ALEMANIA",
+    "ITALIA",
+    "PORTUGAL",
     "HANDICAP ASIATICO",
     "HANDICAP ASIÁTICO",
     "HACER UNA APUESTA",
@@ -163,6 +171,7 @@ PALABRAS_RUIDO = {
     "RESULTADO FINAL",
     "SOLO PARA",
     "SÓLO PARA",
+    "TMTM",
 }
 
 
@@ -777,7 +786,7 @@ def _es_token_basura_ocr(token: str) -> bool:
 def _es_candidato_equipo_valido(candidato: str) -> bool:
     """Valida que un candidato parezca un nombre de equipo y no frase de interfaz/ruido."""
     limpio = re.sub(r"\s+", " ", candidato).strip()
-    if len(limpio) < 3 or len(limpio) > 30:
+    if len(limpio) < 4 or len(limpio) > 30:
         return False
     if re.search(r"[:;{}\[\]~\\]", limpio):
         return False
@@ -787,12 +796,13 @@ def _es_candidato_equipo_valido(candidato: str) -> bool:
     palabras = limpio.split()
     if len(palabras) > 3:
         return False
-    letras = sum(c.isalpha() for c in limpio)
-    if letras < 3:
+    if len(palabras) == 1 and len(re.sub(r"[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ]", "", palabras[0])) < 4:
         return False
-    # Evita palabras sueltas que suelen ser conectores/artículos de frases rotas
+    letras = sum(c.isalpha() for c in limpio)
+    if letras < 4:
+        return False
     minus = [normalizar_texto(p) for p in palabras]
-    if set(minus).issubset({"solo", "para", "nue", "fo", "ussun", "con", "del", "las", "los"}):
+    if set(minus).issubset({"solo", "para", "nue", "fo", "ussun", "con", "del", "las", "los", "war"}):
         return False
     return True
 
@@ -1265,7 +1275,7 @@ with tab_poisson:
 
     go1, go2, go3 = st.columns(3)
     g_cuota_x = go1.number_input(
-        "Cuota Empate (X) Winamax", min_value=1.01, max_value=15.0, value=4.40, step=0.05, key="goal_cuota_x"
+        "Cuota Empate (X) Winamax", min_value=1.01, max_value=15.0, value=3.15, step=0.05, key="goal_cuota_x"
     )
     g_cuota_o25 = go2.number_input(
         "Cuota Over 2.5 Winamax", min_value=1.01, max_value=10.0, value=3.05, step=0.05, key="goal_cuota_o25"
