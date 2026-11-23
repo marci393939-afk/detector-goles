@@ -489,12 +489,16 @@ def calculate_poisson_markets(
     lam_away: float,
     max_goals: int = 6,
     winamax_over25: float | None = None,
+    winamax_under25: float | None = None,
     winamax_draw: float | None = None,
 ) -> dict:
     prob_home = 0.0
     prob_draw = 0.0
     prob_away = 0.0
     prob_over_25 = 0.0
+
+    best_score = "0 - 0"
+    best_prob = -1.0
 
     matrix = []
     for h in range(max_goals + 1):
@@ -504,6 +508,10 @@ def calculate_poisson_markets(
             p_a = poisson_pmf(a, lam_away)
             p_cell = p_h * p_a
             row.append(p_cell)
+
+            if p_cell > best_prob:
+                best_prob = p_cell
+                best_score = f"{h} - {a}"
 
             if h > a:
                 prob_home += p_cell
@@ -530,6 +538,9 @@ def calculate_poisson_markets(
         "lam_home": round(lam_home, 3),
         "lam_away": round(lam_away, 3),
         "expected_total_goals": round(lam_home + lam_away, 3),
+        "exact_score": best_score,
+        "exact_score_prob": round(max(0.0, best_prob) * 100, 1),
+        "exact_score_fair_odd": fair_odd(max(0.0, best_prob)),
         "prob_1": round(prob_home, 4),
         "prob_x": round(prob_draw, 4),
         "prob_2": round(prob_away, 4),
@@ -542,6 +553,7 @@ def calculate_poisson_markets(
         "fair_under_25": fair_odd(prob_under_25),
         "edge_draw": edge(prob_draw, winamax_draw),
         "edge_over_25": edge(prob_over_25, winamax_over25),
+        "edge_under_25": edge(prob_under_25, winamax_under25),
         "matrix_df": pd.DataFrame(
             [[round(val * 100, 1) for val in r] for r in matrix],
             index=[f"Local {i}" for i in range(max_goals + 1)],
@@ -554,43 +566,51 @@ def seleccionar_pronostico_goal(
     markets: dict,
     cuota_x: float,
     cuota_o25: float,
+    cuota_u25: float,
     min_edge: float = 0.05,
 ) -> dict:
-    """Selecciona el mejor pronóstico entre Empate (X) y Over 2.5 según ventaja mínima."""
-    edge_x = markets.get("edge_draw")
-    edge_o25 = markets.get("edge_over_25")
+    """Devuelve el pronóstico de mayor ventaja y el resultado exacto más probable."""
+    candidatos = [
+        {
+            "pick": "EMPATE (X)",
+            "cuota": cuota_x,
+            "prob": round(markets["prob_x"] * 100, 1),
+            "cuota_justa": markets["fair_x"],
+            "edge": markets.get("edge_draw"),
+        },
+        {
+            "pick": "OVER 2.5 GOLES",
+            "cuota": cuota_o25,
+            "prob": round(markets["prob_over_25"] * 100, 1),
+            "cuota_justa": markets["fair_over_25"],
+            "edge": markets.get("edge_over_25"),
+        },
+        {
+            "pick": "UNDER 2.5 GOLES",
+            "cuota": cuota_u25,
+            "prob": round(markets["prob_under_25"] * 100, 1),
+            "cuota_justa": markets["fair_under_25"],
+            "edge": markets.get("edge_under_25"),
+        },
+    ]
 
-    candidatos = []
-    if edge_x is not None and edge_x >= min_edge:
-        candidatos.append(
-            {
-                "pick": "EMPATE (X)",
-                "cuota": cuota_x,
-                "prob": round(markets["prob_x"] * 100, 1),
-                "cuota_justa": markets["fair_x"],
-                "edge": edge_x,
-            }
-        )
-    if edge_o25 is not None and edge_o25 >= min_edge:
-        candidatos.append(
-            {
-                "pick": "OVER 2.5 GOLES",
-                "cuota": cuota_o25,
-                "prob": round(markets["prob_over_25"] * 100, 1),
-                "cuota_justa": markets["fair_over_25"],
-                "edge": edge_o25,
-            }
-        )
+    validos = [c for c in candidatos if c["edge"] is not None and c["edge"] >= min_edge]
+    resultado_exacto = {
+        "marcador": markets["exact_score"],
+        "prob": markets["exact_score_prob"],
+        "cuota_justa": markets["exact_score_fair_odd"],
+    }
 
-    if not candidatos:
+    if not validos:
         return {
             "apostar": False,
             "pick": "NO APOSTAR",
-            "motivo": f"Ningún mercado alcanza el umbral mínimo de ventaja (+{min_edge * 100:.1f}%).",
+            "motivo": f"Ningún mercado supera el umbral mínimo de ventaja (+{min_edge * 100:.1f}%).",
+            "resultado_exacto": resultado_exacto,
         }
 
-    mejor = max(candidatos, key=lambda c: c["edge"])
-    return {"apostar": True, **mejor}
+    mejor = max(validos, key=lambda c: c["edge"])
+    return {"apostar": True, "resultado_exacto": resultado_exacto, **mejor}
 
 
 def run_goal_matchup_poisson(
@@ -602,6 +622,7 @@ def run_goal_matchup_poisson(
     league_avg_per_side: float = 1.35,
     max_lambda: float = 3.20,
     winamax_over25: float | None = None,
+    winamax_under25: float | None = None,
     winamax_draw: float | None = None,
 ) -> dict:
     if not goal_key:
@@ -657,6 +678,7 @@ def run_goal_matchup_poisson(
         lam_home=lam_home,
         lam_away=lam_away,
         winamax_over25=winamax_over25,
+        winamax_under25=winamax_under25,
         winamax_draw=winamax_draw,
     )
 
@@ -677,6 +699,7 @@ def registrar_analisis_goal(
     m: dict,
     cuota_x: float,
     cuota_o25: float,
+    cuota_u25: float,
     pronostico_txt: str,
     nota: str = "",
 ) -> None:
@@ -685,6 +708,8 @@ def registrar_analisis_goal(
             "Local": home_name,
             "Visitante": away_name,
             "Pronóstico": pronostico_txt,
+            "Resultado exacto": m["exact_score"],
+            "Prob. exacto (%)": m["exact_score_prob"],
             "Partidos (N)": last_n,
             "Goles esp.": m["expected_total_goals"],
             "Prob. X (%)": round(m["prob_x"] * 100, 1),
@@ -695,6 +720,10 @@ def registrar_analisis_goal(
             "Cuota justa O2.5": m["fair_over_25"],
             "Cuota Winamax O2.5": cuota_o25,
             "Edge O2.5 (%)": round((m["edge_over_25"] or 0) * 100, 2),
+            "Prob. U2.5 (%)": round(m["prob_under_25"] * 100, 1),
+            "Cuota justa U2.5": m["fair_under_25"],
+            "Cuota Winamax U2.5": cuota_u25,
+            "Edge U2.5 (%)": round((m["edge_under_25"] or 0) * 100, 2),
             "Nota": nota.strip(),
         }
     )
@@ -1186,16 +1215,21 @@ with tab_poisson:
     g_away_input = gc2.text_input("Equipo Visitante", key="goal_away_input")
     g_country_input = gc3.text_input("País (opcional)", key="goal_country_input")
 
-    gp1, gp2, gp3, gp4 = st.columns(4)
+    gp1, gp2 = st.columns(2)
     g_last_n = gp1.slider("Últimos partidos", min_value=5, max_value=20, value=10, key="goal_last_n")
     g_league_avg = gp2.number_input(
         "Media goles/equipo", min_value=0.6, max_value=2.5, value=1.35, step=0.05, key="goal_league_avg"
     )
-    g_cuota_x = gp3.number_input(
-        "Cuota Empate (X) Winamax", min_value=1.01, max_value=15.0, value=3.20, step=0.05, key="goal_cuota_x"
+
+    go1, go2, go3 = st.columns(3)
+    g_cuota_x = go1.number_input(
+        "Cuota Empate (X) Winamax", min_value=1.01, max_value=15.0, value=2.95, step=0.05, key="goal_cuota_x"
     )
-    g_cuota_o25 = gp4.number_input(
-        "Cuota Over 2.5 Winamax", min_value=1.01, max_value=10.0, value=1.95, step=0.05, key="goal_cuota_o25"
+    g_cuota_o25 = go2.number_input(
+        "Cuota Over 2.5 Winamax", min_value=1.01, max_value=10.0, value=3.05, step=0.05, key="goal_cuota_o25"
+    )
+    g_cuota_u25 = go3.number_input(
+        "Cuota Under 2.5 Winamax", min_value=1.01, max_value=10.0, value=1.34, step=0.05, key="goal_cuota_u25"
     )
 
     gl1, gl2 = st.columns(2)
@@ -1228,6 +1262,7 @@ with tab_poisson:
                 league_avg_per_side=g_league_avg,
                 max_lambda=g_max_lambda,
                 winamax_over25=g_cuota_o25,
+                winamax_under25=g_cuota_u25,
                 winamax_draw=g_cuota_x,
             )
             st.session_state["ultimo_goal_analisis"] = {
@@ -1235,6 +1270,7 @@ with tab_poisson:
                 "last_n": g_last_n,
                 "cuota_x": g_cuota_x,
                 "cuota_o25": g_cuota_o25,
+                "cuota_u25": g_cuota_u25,
                 "min_edge": g_min_edge_pct / 100.0,
                 "nota": g_nota,
                 "home_fallback": g_home_input,
@@ -1253,8 +1289,10 @@ with tab_poisson:
             markets=mg,
             cuota_x=ultimo_g["cuota_x"],
             cuota_o25=ultimo_g["cuota_o25"],
+            cuota_u25=ultimo_g.get("cuota_u25", 1.34),
             min_edge=ultimo_g.get("min_edge", 0.05),
         )
+        ex = pron["resultado_exacto"]
 
         for aviso in res_g.get("warnings", []):
             st.warning(f"⚠️ {aviso}")
@@ -1268,21 +1306,31 @@ with tab_poisson:
         gm1.metric("Goles esperados", f"{mg['expected_total_goals']}", f"λ {mg['lam_home']} / {mg['lam_away']}")
         gm2.metric("Prob. Empate (X)", f"{mg['prob_x']*100:.1f}%", f"Cuota justa: {mg['fair_x']}")
         gm3.metric("Prob. Over 2.5", f"{mg['prob_over_25']*100:.1f}%", f"Cuota justa: {mg['fair_over_25']}")
-        gm4.metric(
-            "Edge Over 2.5 / X",
-            f"{(mg['edge_over_25'] or 0)*100:+.1f}%",
-            f"X: {(mg['edge_draw'] or 0)*100:+.1f}%",
+        gm4.metric("Prob. Under 2.5", f"{mg['prob_under_25']*100:.1f}%", f"Cuota justa: {mg['fair_under_25']}")
+
+        ge1, ge2, ge3 = st.columns(3)
+        ge1.metric("Edge Empate (X)", f"{(mg['edge_draw'] or 0)*100:+.1f}%", f"Winamax: {ultimo_g['cuota_x']:.2f}")
+        ge2.metric("Edge Over 2.5", f"{(mg['edge_over_25'] or 0)*100:+.1f}%", f"Winamax: {ultimo_g['cuota_o25']:.2f}")
+        ge3.metric(
+            "Edge Under 2.5",
+            f"{(mg['edge_under_25'] or 0)*100:+.1f}%",
+            f"Winamax: {ultimo_g.get('cuota_u25', 1.34):.2f}",
         )
 
         if pron["apostar"]:
             st.success(
-                f"### ✅ PRONÓSTICO PARA APOSTAR → {pron['pick']}\n"
+                f"### ✅ PRONÓSTICO → {pron['pick']} | RESULTADO EXACTO → `{ex['marcador']}`\n"
                 f"**Cuota Winamax:** `{pron['cuota']:.2f}` | "
                 f"**Prob. modelo:** `{pron['prob']:.1f}%` (cuota justa `{pron['cuota_justa']}`) | "
-                f"**Ventaja:** `+{pron['edge'] * 100:.1f}%`"
+                f"**Ventaja:** `+{pron['edge'] * 100:.1f}%`\n\n"
+                f"**Marcador más probable:** `{ex['marcador']}` (`{ex['prob']:.1f}%` — cuota justa `{ex['cuota_justa']}`)"
             )
         else:
-            st.warning(f"### ⛔ NO APOSTAR\n{pron['motivo']}")
+            st.warning(
+                f"### ⛔ NO APOSTAR | RESULTADO EXACTO MÁS PROBABLE → `{ex['marcador']}`\n"
+                f"{pron['motivo']}\n\n"
+                f"**Marcador más probable:** `{ex['marcador']}` (`{ex['prob']:.1f}%` — cuota justa `{ex['cuota_justa']}`)"
+            )
 
         if st.button("Guardar en registro", key="btn_save_goal_log"):
             registrar_analisis_goal(
@@ -1292,6 +1340,7 @@ with tab_poisson:
                 m=mg,
                 cuota_x=ultimo_g["cuota_x"],
                 cuota_o25=ultimo_g["cuota_o25"],
+                cuota_u25=ultimo_g.get("cuota_u25", 1.34),
                 pronostico_txt=pron["pick"],
                 nota=ultimo_g["nota"],
             )
