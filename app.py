@@ -111,18 +111,26 @@ PALABRAS_RUIDO = {
     "CUOTAS",
     "H2H",
     "CLASIFICACION",
+    "CLASIFICACIÓN",
     "ALINEACIONES",
     "ESTAD",
     "ESTADIS",
     "DIRECTO",
     "PREPARTIDO",
     "PROXIMO GOL",
+    "PRÓXIMO GOL",
     "MAS DE/MENOS DE",
+    "MÁS DE/MENOS DE",
+    "MAS DE",
+    "MÁS DE",
+    "MENOS DE",
+    "AMBOS EQUIPOS",
     "AMBOS",
     "FLASHSCORE",
     "PARTIDO",
     "RESUMEN",
     "ESTADISTICAS",
+    "ESTADÍSTICAS",
     "BET>",
     "BET365",
     "SPORTIUM",
@@ -134,12 +142,19 @@ PALABRAS_RUIDO = {
     "NUEVA VENTANA",
     "PREMIER LEAGUE",
     "HANDICAP ASIATICO",
+    "HANDICAP ASIÁTICO",
     "HACER UNA APUESTA",
     "CASA DE APUESTAS",
     "DOBLE OPORTUNID",
+    "DOBLE OPORTUNIDAD",
     "RESULTADO EXACTO",
     "MAS SELECCIONES",
     "MÁS SELECCIONES",
+    "1ER TIEMPO",
+    "2O TIEMPO",
+    "2º TIEMPO",
+    "FUTBOL",
+    "FÚTBOL",
 }
 
 
@@ -717,6 +732,73 @@ def limpiar_lineas_ocr(texto_ocr: str) -> list[str]:
     return lineas_limpias
 
 
+def _separar_dos_equipos_en_linea(texto: str) -> list[str]:
+    """Divide una línea cuando contiene dos nombres de equipos pegados en horizontal."""
+    limpio = re.sub(r"\s+", " ", texto).strip()
+    if not limpio:
+        return []
+
+    sufijos_club = {
+        "fc",
+        "cf",
+        "cd",
+        "ud",
+        "sc",
+        "ac",
+        "fk",
+        "sk",
+        "bk",
+        "jk",
+        "afc",
+        "bfc",
+        "cfc",
+        "united",
+        "city",
+        "athletic",
+        "rovers",
+        "wanderers",
+        "albion",
+        "town",
+        "county",
+        "real",
+        "sporting",
+        "atletico",
+        "atlético",
+        "deportivo",
+        "racing",
+        "club",
+        "soccer",
+        "andarers",
+    }
+
+    palabras = limpio.split()
+    if len(palabras) >= 2:
+        for idx in range(1, len(palabras)):
+            izq = " ".join(palabras[:idx]).strip()
+            der = " ".join(palabras[idx:]).strip()
+            tok_izq = re.sub(r"[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ]", "", palabras[idx - 1]).lower()
+            tok_der = re.sub(r"[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ]", "", palabras[idx]).lower()
+
+            if (
+                len(izq) >= 3
+                and len(der) >= 3
+                and not _es_token_basura_ocr(izq)
+                and not _es_token_basura_ocr(der)
+                and (
+                    tok_izq in sufijos_club
+                    or tok_der in {"fc", "cf", "cd", "ud", "sc", "ac", "real", "sporting", "club"}
+                    or (
+                        len(palabras) in (2, 3, 4)
+                        and all(re.match(r"^[A-ZÁÉÍÓÚÜÑ]", p) for p in palabras)
+                        and idx in (1, 2)
+                    )
+                )
+            ):
+                return [izq, der]
+
+    return [limpio]
+
+
 def _extraer_equipos_de_linea(linea: str) -> list[str]:
     partes = re.split(
         r"\s*(?:>|\bvs\.?\b|\s-\s|\d{1,2}:\d{2})\s*", linea, flags=re.IGNORECASE
@@ -725,12 +807,15 @@ def _extraer_equipos_de_linea(linea: str) -> list[str]:
     for parte in partes:
         limpia_parte = re.sub(r"\b\d+\b", "", parte).strip(" -|>/\\")
         limpia_parte = re.sub(r"\s+", " ", limpia_parte).strip()
-        if limpia_parte.isupper() and len(limpia_parte) <= 4:
+        if not limpia_parte:
             continue
-        if _es_token_basura_ocr(limpia_parte):
-            continue
-        if 2 <= len(limpia_parte) <= 35 and limpia_parte not in encontrados:
-            encontrados.append(limpia_parte)
+        for sub_eq in _separar_dos_equipos_en_linea(limpia_parte):
+            if sub_eq.isupper() and len(sub_eq) <= 4:
+                continue
+            if _es_token_basura_ocr(sub_eq):
+                continue
+            if 2 <= len(sub_eq) <= 35 and sub_eq not in encontrados:
+                encontrados.append(sub_eq)
     return encontrados
 
 
@@ -763,10 +848,10 @@ def sugerir_equipos_candidatos(texto_ocr: str) -> tuple[str, str]:
             if eq not in equipos:
                 equipos.append(eq)
 
-    if not candidatos_cruce and len(equipos) == 1:
-        palabras = equipos[0].split()
-        if len(palabras) == 2 and all(len(p) >= 3 and p[0].isupper() for p in palabras):
-            return palabras[0], palabras[1]
+    if len(equipos) == 1:
+        separados = _separar_dos_equipos_en_linea(equipos[0])
+        if len(separados) == 2:
+            return separados[0], separados[1]
 
     fuente = candidatos_cruce if len(candidatos_cruce) >= 2 else equipos
     local = fuente[0] if len(fuente) >= 1 else ""
@@ -1023,10 +1108,8 @@ with tab_poisson:
             loc_ocr_g, vis_ocr_g = sugerir_equipos_candidatos(texto_ocr_g)
             marca_ocr = f"{archivo_goal.file_id}_{psm_goal}"
             if st.session_state.get("ultimo_ocr_goal_file") != marca_ocr:
-                if loc_ocr_g:
-                    st.session_state["goal_home_input"] = loc_ocr_g
-                if vis_ocr_g:
-                    st.session_state["goal_away_input"] = vis_ocr_g
+                st.session_state["goal_home_input"] = loc_ocr_g
+                st.session_state["goal_away_input"] = vis_ocr_g
                 st.session_state["goal_country_input"] = ""
                 st.session_state["ultimo_ocr_goal_file"] = marca_ocr
             with st.expander("Ver texto OCR detectado (GOAL API)"):
