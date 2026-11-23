@@ -155,6 +155,10 @@ PALABRAS_RUIDO = {
     "2º TIEMPO",
     "FUTBOL",
     "FÚTBOL",
+    "SRF",
+    "SOLO RESULTADO FINAL",
+    "SÓLO RESULTADO FINAL",
+    "RESULTADO FINAL",
 }
 
 
