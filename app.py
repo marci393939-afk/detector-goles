@@ -550,6 +550,49 @@ def calculate_poisson_markets(
     }
 
 
+def seleccionar_pronostico_goal(
+    markets: dict,
+    cuota_x: float,
+    cuota_o25: float,
+    min_edge: float = 0.05,
+) -> dict:
+    """Selecciona el mejor pronóstico entre Empate (X) y Over 2.5 según ventaja mínima."""
+    edge_x = markets.get("edge_draw")
+    edge_o25 = markets.get("edge_over_25")
+
+    candidatos = []
+    if edge_x is not None and edge_x >= min_edge:
+        candidatos.append(
+            {
+                "pick": "EMPATE (X)",
+                "cuota": cuota_x,
+                "prob": round(markets["prob_x"] * 100, 1),
+                "cuota_justa": markets["fair_x"],
+                "edge": edge_x,
+            }
+        )
+    if edge_o25 is not None and edge_o25 >= min_edge:
+        candidatos.append(
+            {
+                "pick": "OVER 2.5 GOLES",
+                "cuota": cuota_o25,
+                "prob": round(markets["prob_over_25"] * 100, 1),
+                "cuota_justa": markets["fair_over_25"],
+                "edge": edge_o25,
+            }
+        )
+
+    if not candidatos:
+        return {
+            "apostar": False,
+            "pick": "NO APOSTAR",
+            "motivo": f"Ningún mercado alcanza el umbral mínimo de ventaja (+{min_edge * 100:.1f}%).",
+        }
+
+    mejor = max(candidatos, key=lambda c: c["edge"])
+    return {"apostar": True, **mejor}
+
+
 def run_goal_matchup_poisson(
     home_query: str,
     away_query: str,
@@ -634,12 +677,14 @@ def registrar_analisis_goal(
     m: dict,
     cuota_x: float,
     cuota_o25: float,
+    pronostico_txt: str,
     nota: str = "",
 ) -> None:
     st.session_state["analisis_log"].append(
         {
             "Local": home_name,
             "Visitante": away_name,
+            "Pronóstico": pronostico_txt,
             "Partidos (N)": last_n,
             "Goles esp.": m["expected_total_goals"],
             "Prob. X (%)": round(m["prob_x"] * 100, 1),
@@ -1153,13 +1198,22 @@ with tab_poisson:
         "Cuota Over 2.5 Winamax", min_value=1.01, max_value=10.0, value=1.95, step=0.05, key="goal_cuota_o25"
     )
 
-    g_max_lambda = st.slider(
+    gl1, gl2 = st.columns(2)
+    g_max_lambda = gl1.slider(
         "Límite máximo de lambda (λ) por equipo",
         min_value=1.50,
         max_value=5.00,
         value=3.20,
         step=0.10,
         key="goal_max_lambda",
+    )
+    g_min_edge_pct = gl2.slider(
+        "Ventaja mínima para marcar en verde (%)",
+        min_value=1.0,
+        max_value=25.0,
+        value=5.0,
+        step=0.5,
+        key="goal_min_edge_pct",
     )
     g_nota = st.text_input("Nota rápida (opcional)", key="goal_nota_input")
 
@@ -1181,6 +1235,7 @@ with tab_poisson:
                 "last_n": g_last_n,
                 "cuota_x": g_cuota_x,
                 "cuota_o25": g_cuota_o25,
+                "min_edge": g_min_edge_pct / 100.0,
                 "nota": g_nota,
                 "home_fallback": g_home_input,
                 "away_fallback": g_away_input,
@@ -1194,6 +1249,12 @@ with tab_poisson:
         ht = res_g["home_team"]
         at = res_g["away_team"]
         mg = res_g["markets"]
+        pron = seleccionar_pronostico_goal(
+            markets=mg,
+            cuota_x=ultimo_g["cuota_x"],
+            cuota_o25=ultimo_g["cuota_o25"],
+            min_edge=ultimo_g.get("min_edge", 0.05),
+        )
 
         for aviso in res_g.get("warnings", []):
             st.warning(f"⚠️ {aviso}")
@@ -1213,6 +1274,16 @@ with tab_poisson:
             f"X: {(mg['edge_draw'] or 0)*100:+.1f}%",
         )
 
+        if pron["apostar"]:
+            st.success(
+                f"### ✅ PRONÓSTICO PARA APOSTAR → {pron['pick']}\n"
+                f"**Cuota Winamax:** `{pron['cuota']:.2f}` | "
+                f"**Prob. modelo:** `{pron['prob']:.1f}%` (cuota justa `{pron['cuota_justa']}`) | "
+                f"**Ventaja:** `+{pron['edge'] * 100:.1f}%`"
+            )
+        else:
+            st.warning(f"### ⛔ NO APOSTAR\n{pron['motivo']}")
+
         if st.button("Guardar en registro", key="btn_save_goal_log"):
             registrar_analisis_goal(
                 home_name=ht.get("name") or ultimo_g["home_fallback"],
@@ -1221,6 +1292,7 @@ with tab_poisson:
                 m=mg,
                 cuota_x=ultimo_g["cuota_x"],
                 cuota_o25=ultimo_g["cuota_o25"],
+                pronostico_txt=pron["pick"],
                 nota=ultimo_g["nota"],
             )
             st.success("Análisis guardado en la pestaña 'Registro de análisis'.")
