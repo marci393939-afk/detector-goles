@@ -542,6 +542,7 @@ def run_goal_matchup_poisson(
     goal_key: str,
     last_n: int = 10,
     league_avg_per_side: float = 1.35,
+    max_lambda: float = 3.20,
     winamax_over25: float | None = None,
     winamax_draw: float | None = None,
 ) -> dict:
@@ -573,8 +574,26 @@ def run_goal_matchup_poisson(
     away_att = (away_stats["gf_avg"] / base) if away_stats["gf_avg"] > 0 else 1.0
     away_def = (away_stats["ga_avg"] / base) if away_stats["ga_avg"] > 0 else 1.0
 
-    lam_home = home_att * away_def * base
-    lam_away = away_att * home_def * base
+    raw_lam_home = home_att * away_def * base
+    raw_lam_away = away_att * home_def * base
+
+    cap = max(0.5, float(max_lambda))
+    lam_home = min(max(0.10, raw_lam_home), cap)
+    lam_away = min(max(0.10, raw_lam_away), cap)
+
+    warnings: list[str] = []
+    if home_stats["count"] < last_n:
+        warnings.append(
+            f"{home_team.get('name') or home_query} solo tiene {home_stats['count']} de {last_n} partidos solicitados."
+        )
+    if away_stats["count"] < last_n:
+        warnings.append(
+            f"{away_team.get('name') or away_query} solo tiene {away_stats['count']} de {last_n} partidos solicitados."
+        )
+    if raw_lam_home > cap or raw_lam_away > cap:
+        warnings.append(
+            f"Lambda acotada al máximo ({cap:.2f}) — sin tope era {raw_lam_home:.3f} / {raw_lam_away:.3f}."
+        )
 
     markets = calculate_poisson_markets(
         lam_home=lam_home,
@@ -589,6 +608,7 @@ def run_goal_matchup_poisson(
         "home_stats": home_stats,
         "away_stats": away_stats,
         "markets": markets,
+        "warnings": warnings,
     }
 
 
@@ -1031,6 +1051,14 @@ with tab_poisson:
         "Cuota Over 2.5 Winamax", min_value=1.01, max_value=10.0, value=1.95, step=0.05, key="goal_cuota_o25"
     )
 
+    g_max_lambda = st.slider(
+        "Límite máximo de lambda (λ) por equipo",
+        min_value=1.50,
+        max_value=5.00,
+        value=3.20,
+        step=0.10,
+        key="goal_max_lambda",
+    )
     g_nota = st.text_input("Nota rápida (opcional)", key="goal_nota_input")
 
     if st.button("Calcular probabilidades", type="primary", key="btn_calc_goal_poisson"):
@@ -1042,6 +1070,7 @@ with tab_poisson:
                 goal_key=goal_key_activa,
                 last_n=g_last_n,
                 league_avg_per_side=g_league_avg,
+                max_lambda=g_max_lambda,
                 winamax_over25=g_cuota_o25,
                 winamax_draw=g_cuota_x,
             )
@@ -1063,6 +1092,9 @@ with tab_poisson:
         ht = res_g["home_team"]
         at = res_g["away_team"]
         mg = res_g["markets"]
+
+        for aviso in res_g.get("warnings", []):
+            st.warning(f"⚠️ {aviso}")
 
         st.caption(
             f"Equipos detectados: **{ht.get('name')}** (`{ht.get('country') or 'N/D'}`) "
@@ -1096,13 +1128,13 @@ with tab_poisson:
 
         with st.expander("Últimos partidos usados en el cálculo"):
             st.write(
-                f"**{ht.get('name')}** "
-                f"(GF media: {res_g['home_stats']['gf_avg']:.2f} | GC media: {res_g['home_stats']['ga_avg']:.2f})"
+                f"**{ht.get('name')}** ({res_g['home_stats']['count']} PJ — "
+                f"GF media: {res_g['home_stats']['gf_avg']:.2f} | GC media: {res_g['home_stats']['ga_avg']:.2f})"
             )
             st.dataframe(pd.DataFrame(res_g["home_stats"]["matches"]), width="stretch")
             st.write(
-                f"**{at.get('name')}** "
-                f"(GF media: {res_g['away_stats']['gf_avg']:.2f} | GC media: {res_g['away_stats']['ga_avg']:.2f})"
+                f"**{at.get('name')}** ({res_g['away_stats']['count']} PJ — "
+                f"GF media: {res_g['away_stats']['gf_avg']:.2f} | GC media: {res_g['away_stats']['ga_avg']:.2f})"
             )
             st.dataframe(pd.DataFrame(res_g["away_stats"]["matches"]), width="stretch")
 
