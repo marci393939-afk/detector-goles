@@ -141,6 +141,8 @@ PALABRAS_RUIDO = {
     "JORNADA",
     "NUEVA VENTANA",
     "PREMIER LEAGUE",
+    "FIRST LEAGUE",
+    "ARMENIA",
     "HANDICAP ASIATICO",
     "HANDICAP ASIÁTICO",
     "HACER UNA APUESTA",
@@ -159,6 +161,8 @@ PALABRAS_RUIDO = {
     "SOLO RESULTADO FINAL",
     "SÓLO RESULTADO FINAL",
     "RESULTADO FINAL",
+    "SOLO PARA",
+    "SÓLO PARA",
 }
 
 
@@ -748,7 +752,7 @@ def preparar_imagen_ocr(imagen: Image.Image) -> Image.Image:
 
 
 @st.cache_data(show_spinner=False)
-def ejecutar_ocr_bytes(img_bytes: bytes, psm: int = 6) -> str:
+def ejecutar_ocr_bytes(img_bytes: bytes, psm: int = 11) -> str:
     """Ejecuta Tesseract OCR sobre los bytes de la imagen."""
     imagen = Image.open(BytesIO(img_bytes))
     procesada = preparar_imagen_ocr(imagen)
@@ -758,6 +762,8 @@ def ejecutar_ocr_bytes(img_bytes: bytes, psm: int = 6) -> str:
 
 def _es_token_basura_ocr(token: str) -> bool:
     """Detecta tokens cortos deformados o repeticiones sin sentido."""
+    if ":" in token or ";" in token:
+        return True
     limpio = re.sub(r"[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ]", "", token)
     if len(limpio) < 2:
         return True
@@ -766,6 +772,29 @@ def _es_token_basura_ocr(token: str) -> bool:
     if len(limpio) <= 6 and re.search(r"[A-Z]{2,}[a-z]+[A-Z]|[a-z]+[A-Z]{2,}", limpio):
         return True
     return False
+
+
+def _es_candidato_equipo_valido(candidato: str) -> bool:
+    """Valida que un candidato parezca un nombre de equipo y no frase de interfaz/ruido."""
+    limpio = re.sub(r"\s+", " ", candidato).strip()
+    if len(limpio) < 3 or len(limpio) > 30:
+        return False
+    if re.search(r"[:;{}\[\]~\\]", limpio):
+        return False
+    norm_upper = normalizar_texto(limpio).upper()
+    if any(ruido in norm_upper for ruido in PALABRAS_RUIDO):
+        return False
+    palabras = limpio.split()
+    if len(palabras) > 3:
+        return False
+    letras = sum(c.isalpha() for c in limpio)
+    if letras < 3:
+        return False
+    # Evita palabras sueltas que suelen ser conectores/artículos de frases rotas
+    minus = [normalizar_texto(p) for p in palabras]
+    if set(minus).issubset({"solo", "para", "nue", "fo", "ussun", "con", "del", "las", "los"}):
+        return False
+    return True
 
 
 def limpiar_lineas_ocr(texto_ocr: str) -> list[str]:
@@ -781,7 +810,7 @@ def limpiar_lineas_ocr(texto_ocr: str) -> list[str]:
         if not limpia:
             continue
 
-        if "_" in limpia or "=" in limpia:
+        if "_" in limpia or "=" in limpia or ":" in limpia:
             continue
 
         if re.fullmatch(r"\d{1,2}[:.\-]\d{1,2}(?:[:.\-]\d{2,4})?", limpia):
@@ -802,7 +831,7 @@ def limpiar_lineas_ocr(texto_ocr: str) -> list[str]:
             continue
 
         letras = sum(c.isalpha() for c in limpia)
-        if letras < 2:
+        if letras < 3:
             continue
 
         lineas_limpias.append(limpia)
@@ -902,28 +931,23 @@ def _extraer_equipos_de_linea(linea: str) -> list[str]:
     )
     encontrados: list[str] = []
     for parte in partes:
-        limpia_parte = re.sub(r"\b\d+\b", "", parte).strip(" -|>/\\")
-        limpia_parte = re.sub(r"\s+", " ", limpia_parte).strip()
+        limpia_parte = re.sub(r"\s+", " ", parte).strip(" -|>/\\")
         if not limpia_parte:
             continue
         for sub_eq in _separar_dos_equipos_en_linea(limpia_parte):
-            if sub_eq.isupper() and len(sub_eq) <= 4:
-                continue
-            if _es_token_basura_ocr(sub_eq):
-                continue
-            if 2 <= len(sub_eq) <= 35 and sub_eq not in encontrados:
+            if _es_candidato_equipo_valido(sub_eq) and sub_eq not in encontrados:
                 encontrados.append(sub_eq)
     return encontrados
 
 
 def sugerir_equipos_candidatos(texto_ocr: str) -> tuple[str, str]:
-    """Sugiere equipo local y visitante priorizando líneas con cruce, marcador o 'vs'."""
+    """Sugiere equipo local y visitante válidos o devuelve vacío si el OCR no es fiable."""
     lineas = limpiar_lineas_ocr(texto_ocr)
     candidatos_cruce: list[str] = []
     equipos: list[str] = []
 
     for linea in lineas:
-        if re.search(r"[|{}~<>\\]", linea) and ">" not in linea:
+        if re.search(r"[|{}~<>\\:]", linea) and ">" not in linea:
             continue
 
         es_cruce = bool(
@@ -932,7 +956,7 @@ def sugerir_equipos_candidatos(texto_ocr: str) -> tuple[str, str]:
             or re.search(r"\b\d{1,2}:\d{2}\b", linea)
         )
 
-        if not es_cruce and re.search(r"\d", linea):
+        if not es_cruce and re.search(r"\d{3,}", linea):
             continue
 
         partes_linea = _extraer_equipos_de_linea(linea)
@@ -947,12 +971,14 @@ def sugerir_equipos_candidatos(texto_ocr: str) -> tuple[str, str]:
 
     if len(equipos) == 1:
         separados = _separar_dos_equipos_en_linea(equipos[0])
-        if len(separados) == 2:
+        if len(separados) == 2 and all(_es_candidato_equipo_valido(x) for x in separados):
             return separados[0], separados[1]
 
     fuente = candidatos_cruce if len(candidatos_cruce) >= 2 else equipos
-    local = fuente[0] if len(fuente) >= 1 else ""
-    visitante = fuente[1] if len(fuente) >= 2 else ""
+    local = fuente[0] if len(fuente) >= 1 and _es_candidato_equipo_valido(fuente[0]) else ""
+    visitante = (
+        fuente[1] if len(fuente) >= 2 and _es_candidato_equipo_valido(fuente[1]) else ""
+    )
     return local, visitante
 
 
@@ -1199,7 +1225,7 @@ with tab_poisson:
     )
     psm_goal = st.selectbox(
         "Modo OCR (PSM)",
-        options=[6, 4, 11, 3],
+        options=[11, 6, 4, 3],
         index=0,
         key="goal_ocr_psm",
     )
@@ -1239,7 +1265,7 @@ with tab_poisson:
 
     go1, go2, go3 = st.columns(3)
     g_cuota_x = go1.number_input(
-        "Cuota Empate (X) Winamax", min_value=1.01, max_value=15.0, value=2.95, step=0.05, key="goal_cuota_x"
+        "Cuota Empate (X) Winamax", min_value=1.01, max_value=15.0, value=4.40, step=0.05, key="goal_cuota_x"
     )
     g_cuota_o25 = go2.number_input(
         "Cuota Over 2.5 Winamax", min_value=1.01, max_value=10.0, value=3.05, step=0.05, key="goal_cuota_o25"
@@ -1393,7 +1419,7 @@ with tab_detector:
         auto_fetch = st.checkbox(
             "Buscar promedios automáticamente al subir una captura nueva", value=True
         )
-        psm = st.selectbox("Modo de segmentación OCR (PSM)", options=[6, 4, 11, 3], index=0)
+        psm = st.selectbox("Modo de segmentación OCR (PSM)", options=[11, 6, 4, 3], index=0)
         min_edge_pct = st.slider(
             "Ventaja mínima sobre cuota (%)", min_value=1.0, max_value=25.0, value=5.0, step=0.5
         )
