@@ -142,8 +142,10 @@ PALABRAS_RUIDO = {
     "NUEVA VENTANA",
     "PREMIER LEAGUE",
     "FIRST LEAGUE",
+    "SUPER LEAGUE",
     "ARMENIA",
     "UCRANIA",
+    "KENIA",
     "ESPANA",
     "ESPAÑA",
     "INGLATERRA",
@@ -172,6 +174,8 @@ PALABRAS_RUIDO = {
     "SOLO PARA",
     "SÓLO PARA",
     "TMTM",
+    "YOUTH FOOTBALL",
+    "BLUE EAGLES",
 }
 
 
@@ -1275,13 +1279,13 @@ with tab_poisson:
 
     go1, go2, go3 = st.columns(3)
     g_cuota_x = go1.number_input(
-        "Cuota Empate (X) Winamax", min_value=1.01, max_value=15.0, value=3.15, step=0.05, key="goal_cuota_x"
+        "Cuota Empate (X) Winamax", min_value=1.01, max_value=15.0, value=2.90, step=0.05, key="goal_cuota_x"
     )
     g_cuota_o25 = go2.number_input(
-        "Cuota Over 2.5 Winamax", min_value=1.01, max_value=10.0, value=3.05, step=0.05, key="goal_cuota_o25"
+        "Cuota Over 2.5 Winamax", min_value=1.01, max_value=10.0, value=2.80, step=0.05, key="goal_cuota_o25"
     )
     g_cuota_u25 = go3.number_input(
-        "Cuota Under 2.5 Winamax", min_value=1.01, max_value=10.0, value=1.34, step=0.05, key="goal_cuota_u25"
+        "Cuota Under 2.5 Winamax", min_value=1.01, max_value=10.0, value=1.39, step=0.05, key="goal_cuota_u25"
     )
 
     gl1, gl2 = st.columns(2)
@@ -1341,7 +1345,7 @@ with tab_poisson:
             markets=mg,
             cuota_x=ultimo_g["cuota_x"],
             cuota_o25=ultimo_g["cuota_o25"],
-            cuota_u25=ultimo_g.get("cuota_u25", 1.34),
+            cuota_u25=ultimo_g.get("cuota_u25", 1.39),
             min_edge=ultimo_g.get("min_edge", 0.05),
         )
         ex = pron["resultado_exacto"]
@@ -1366,7 +1370,7 @@ with tab_poisson:
         ge3.metric(
             "Edge Under 2.5",
             f"{(mg['edge_under_25'] or 0)*100:+.1f}%",
-            f"Winamax: {ultimo_g.get('cuota_u25', 1.34):.2f}",
+            f"Winamax: {ultimo_g.get('cuota_u25', 1.39):.2f}",
         )
 
         if pron["apostar"]:
@@ -1392,7 +1396,7 @@ with tab_poisson:
                 m=mg,
                 cuota_x=ultimo_g["cuota_x"],
                 cuota_o25=ultimo_g["cuota_o25"],
-                cuota_u25=ultimo_g.get("cuota_u25", 1.34),
+                cuota_u25=ultimo_g.get("cuota_u25", 1.39),
                 pronostico_txt=pron["pick"],
                 nota=ultimo_g["nota"],
             )
