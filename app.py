@@ -1152,6 +1152,15 @@ def _aplicar_preset_goal() -> None:
         st.session_state["goal_country_input"] = c
 
 
+def _limpiar_partido_goal() -> None:
+    st.session_state["goal_home_input"] = ""
+    st.session_state["goal_away_input"] = ""
+    st.session_state["goal_country_input"] = ""
+    st.session_state["goal_nota_input"] = ""
+    st.session_state["ultimo_goal_analisis"] = None
+    st.session_state["ultimo_ocr_goal_file"] = None
+
+
 st.title("⚽ Detector de Goles (+2.5 / -2.5)")
 st.caption("Equipos por captura, estadísticas reales vía API-Football (v3) y GOAL API + Poisson.")
 
@@ -1168,13 +1177,16 @@ with tab_poisson:
     )
     goal_key_activa = obtener_goal_key(goal_key_manual)
 
-    st.selectbox(
+    col_p1, col_p2 = st.columns([3, 1.3])
+    col_p1.selectbox(
         "Acceso rápido",
         options=list(QUICK_PRESETS_GOAL.keys()),
         index=1,
         key="goal_preset_select",
         on_change=_aplicar_preset_goal,
     )
+    col_p2.markdown("<br>", unsafe_allow_html=True)
+    col_p2.button("🧹 Limpiar", key="btn_clear_goal", on_click=_limpiar_partido_goal, width="stretch")
 
     archivo_goal = st.file_uploader(
         "Sube una captura del partido para sugerir los equipos en Poisson",
@@ -1251,7 +1263,7 @@ with tab_poisson:
     )
     g_nota = st.text_input("Nota rápida (opcional)", key="goal_nota_input")
 
-    if st.button("Calcular probabilidades", type="primary", key="btn_calc_goal_poisson"):
+    if st.button("Calcular probabilidades", type="primary", key="btn_calc_goal_poisson", width="stretch"):
         try:
             res_g = run_goal_matchup_poisson(
                 home_query=g_home_input,
@@ -1332,7 +1344,7 @@ with tab_poisson:
                 f"**Marcador más probable:** `{ex['marcador']}` (`{ex['prob']:.1f}%` — cuota justa `{ex['cuota_justa']}`)"
             )
 
-        if st.button("Guardar en registro", key="btn_save_goal_log"):
+        if st.button("Guardar en registro", key="btn_save_goal_log", width="stretch"):
             registrar_analisis_goal(
                 home_name=ht.get("name") or ultimo_g["home_fallback"],
                 away_name=at.get("name") or ultimo_g["away_fallback"],
