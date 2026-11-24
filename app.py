@@ -290,11 +290,12 @@ def obtener_promedios_10_api(team_id: int, api_key: str) -> dict | None:
 
     partidos_ordenados = sorted(partidos, key=_fecha_partido, reverse=True)[:10]
 
-    gf_total = 0
-    gc_total = 0
+    gf_total = 0.0
+    gc_total = 0.0
+    peso_total = 0.0
     validos = 0
 
-    for f in partidos_ordenados:
+    for idx, f in enumerate(partidos_ordenados):
         teams = f.get("teams", {})
         goals = f.get("goals", {})
         home_id = teams.get("home", {}).get("id")
@@ -305,22 +306,25 @@ def obtener_promedios_10_api(team_id: int, api_key: str) -> dict | None:
         if g_home is None or g_away is None:
             continue
 
+        peso = 0.93**idx
         if home_id == team_id:
-            gf_total += int(g_home)
-            gc_total += int(g_away)
+            gf_total += int(g_home) * peso
+            gc_total += int(g_away) * peso
+            peso_total += peso
             validos += 1
         elif away_id == team_id:
-            gf_total += int(g_away)
-            gc_total += int(g_home)
+            gf_total += int(g_away) * peso
+            gc_total += int(g_home) * peso
+            peso_total += peso
             validos += 1
 
-    if validos == 0:
+    if validos == 0 or peso_total == 0:
         return None
 
     return {
         "partidos": validos,
-        "gf_prom": round(gf_total / validos, 2),
-        "gc_prom": round(gc_total / validos, 2),
+        "gf_prom": round(gf_total / peso_total, 2),
+        "gc_prom": round(gc_total / peso_total, 2),
     }
 
 
@@ -462,43 +466,102 @@ def goal_fetch_team_results(team_id: str, goal_key: str, limit: int = 50) -> lis
     return matches
 
 
-def goal_summarize_team_goals(matches: list[dict], team_id: str, last_n: int = 10) -> dict:
+def goal_summarize_team_goals(
+    matches: list[dict],
+    team_id: str,
+    last_n: int = 10,
+    prefer_venue: str | None = None,
+) -> dict:
+    """
+    Calcula medias ponderadas por recencia, con ajuste suave por condición
+    (Local en casa / Visitante fuera) y tasas reales de Over/Under 2.5.
+    """
     subset = matches[:last_n]
     if not subset:
-        return {"count": 0, "gf_avg": 0.0, "ga_avg": 0.0, "total_avg": 0.0, "matches": []}
+        return {
+            "count": 0,
+            "gf_avg": 0.0,
+            "ga_avg": 0.0,
+            "total_avg": 0.0,
+            "over25_rate": 0.0,
+            "under25_rate": 0.0,
+            "venue_used": False,
+            "matches": [],
+        }
 
-    gf_total = 0
-    ga_total = 0
+    gf_w_sum = 0.0
+    ga_w_sum = 0.0
+    w_sum = 0.0
+
+    venue_gf_sum = 0.0
+    venue_ga_sum = 0.0
+    venue_count = 0
+
+    over25_count = 0
     rows = []
 
-    for m in subset:
+    for idx, m in enumerate(subset):
         hg = int(m["homeTeamFtScore"])
         ag = int(m["awayTeamFtScore"])
         is_home = m.get("homeTeamId") == team_id
         gf = hg if is_home else ag
         ga = ag if is_home else hg
+        total_g = hg + ag
 
-        gf_total += gf
-        ga_total += ga
+        if total_g >= 3:
+            over25_count += 1
+
+        # Decaimiento exponencial suave: los últimos partidos pesan más
+        peso = 0.92**idx
+        gf_w_sum += gf * peso
+        ga_w_sum += ga * peso
+        w_sum += peso
+
+        if (prefer_venue == "home" and is_home) or (prefer_venue == "away" and not is_home):
+            venue_gf_sum += gf
+            venue_ga_sum += ga
+            venue_count += 1
+
         rows.append(
             {
                 "Fecha": m.get("matchDate"),
                 "Competición": m.get("leagueName"),
+                "Cond.": "Local" if is_home else "Visit.",
                 "Local": m.get("homeTeamName"),
                 "Visitante": m.get("awayTeamName"),
                 "Marcador": f"{hg} - {ag}",
                 "GF": gf,
                 "GC": ga,
-                "Total": hg + ag,
+                "Total": total_g,
             }
         )
 
     n = len(subset)
+    gf_general = gf_w_sum / w_sum
+    ga_general = ga_w_sum / w_sum
+
+    venue_used = False
+    if prefer_venue in ("home", "away") and venue_count >= 3:
+        gf_venue = venue_gf_sum / venue_count
+        ga_venue = venue_ga_sum / venue_count
+        gf_final = (0.60 * gf_general) + (0.40 * gf_venue)
+        ga_final = (0.60 * ga_general) + (0.40 * ga_venue)
+        venue_used = True
+    else:
+        gf_final = gf_general
+        ga_final = ga_general
+
+    over_rate = round((over25_count / n) * 100, 1)
+    under_rate = round(100.0 - over_rate, 1)
+
     return {
         "count": n,
-        "gf_avg": gf_total / n,
-        "ga_avg": ga_total / n,
-        "total_avg": (gf_total + ga_total) / n,
+        "gf_avg": gf_final,
+        "ga_avg": ga_final,
+        "total_avg": gf_final + ga_final,
+        "over25_rate": over_rate,
+        "under25_rate": under_rate,
+        "venue_used": venue_used,
         "matches": rows,
     }
 
@@ -520,21 +583,39 @@ def calculate_poisson_markets(
     prob_away = 0.0
     prob_over_25 = 0.0
 
-    best_score = "0 - 0"
-    best_prob = -1.0
+    # Ajuste suave tipo Dixon-Coles para marcadores bajos (0-0, 1-0, 0-1, 1-1)
+    rho = -0.06
+    cell_probs: list[tuple[str, float]] = []
+    raw_matrix: list[list[float]] = []
+    total_mass = 0.0
 
-    matrix = []
     for h in range(max_goals + 1):
         row = []
         p_h = poisson_pmf(h, lam_home)
         for a in range(max_goals + 1):
             p_a = poisson_pmf(a, lam_away)
-            p_cell = p_h * p_a
-            row.append(p_cell)
+            tau = 1.0
+            if h == 0 and a == 0:
+                tau = 1.0 - (lam_home * lam_away * rho)
+            elif h == 0 and a == 1:
+                tau = 1.0 + (lam_home * rho)
+            elif h == 1 and a == 0:
+                tau = 1.0 + (lam_away * rho)
+            elif h == 1 and a == 1:
+                tau = 1.0 - rho
 
-            if p_cell > best_prob:
-                best_prob = p_cell
-                best_score = f"{h} - {a}"
+            p_cell = max(0.0, p_h * p_a * max(0.75, min(1.25, tau)))
+            row.append(p_cell)
+            total_mass += p_cell
+        raw_matrix.append(row)
+
+    matrix: list[list[float]] = []
+    for h in range(max_goals + 1):
+        norm_row = []
+        for a in range(max_goals + 1):
+            p_cell = raw_matrix[h][a] / total_mass if total_mass > 0 else raw_matrix[h][a]
+            norm_row.append(p_cell)
+            cell_probs.append((f"{h} - {a}", p_cell))
 
             if h > a:
                 prob_home += p_cell
@@ -545,7 +626,7 @@ def calculate_poisson_markets(
 
             if (h + a) >= 3:
                 prob_over_25 += p_cell
-        matrix.append(row)
+        matrix.append(norm_row)
 
     prob_under_25 = max(0.0, 1.0 - prob_over_25)
 
@@ -557,6 +638,17 @@ def calculate_poisson_markets(
             return None
         return round((p * odd) - 1.0, 4)
 
+    top_scores_sorted = sorted(cell_probs, key=lambda x: x[1], reverse=True)[:3]
+    top_exact_scores = [
+        {
+            "marcador": sc,
+            "prob": round(pr * 100, 1),
+            "cuota_justa": fair_odd(pr),
+        }
+        for sc, pr in top_scores_sorted
+    ]
+    best_score, best_prob = top_scores_sorted[0]
+
     return {
         "lam_home": round(lam_home, 3),
         "lam_away": round(lam_away, 3),
@@ -564,6 +656,7 @@ def calculate_poisson_markets(
         "exact_score": best_score,
         "exact_score_prob": round(max(0.0, best_prob) * 100, 1),
         "exact_score_fair_odd": fair_odd(max(0.0, best_prob)),
+        "top_exact_scores": top_exact_scores,
         "prob_1": round(prob_home, 4),
         "prob_x": round(prob_draw, 4),
         "prob_2": round(prob_away, 4),
@@ -591,44 +684,69 @@ def seleccionar_pronostico_goal(
     cuota_o25: float,
     cuota_u25: float,
     min_edge: float = 0.05,
+    min_prob_ou: float = 0.60,
+    solo_goles: bool = False,
 ) -> dict:
-    """Devuelve el pronóstico de mayor ventaja y el resultado exacto más probable."""
+    """
+    Exige tanto ventaja mínima (edge) como probabilidad mínima en +2.5 / -2.5 goles
+    para filtrar partidos ajustados (~50-58%) y reducir fallos.
+    """
     candidatos = [
-        {
-            "pick": "EMPATE (X)",
-            "cuota": cuota_x,
-            "prob": round(markets["prob_x"] * 100, 1),
-            "cuota_justa": markets["fair_x"],
-            "edge": markets.get("edge_draw"),
-        },
         {
             "pick": "OVER 2.5 GOLES",
             "cuota": cuota_o25,
             "prob": round(markets["prob_over_25"] * 100, 1),
+            "prob_raw": markets["prob_over_25"],
             "cuota_justa": markets["fair_over_25"],
             "edge": markets.get("edge_over_25"),
+            "min_prob_req": min_prob_ou,
         },
         {
             "pick": "UNDER 2.5 GOLES",
             "cuota": cuota_u25,
             "prob": round(markets["prob_under_25"] * 100, 1),
+            "prob_raw": markets["prob_under_25"],
             "cuota_justa": markets["fair_under_25"],
             "edge": markets.get("edge_under_25"),
+            "min_prob_req": min_prob_ou,
         },
     ]
 
-    validos = [c for c in candidatos if c["edge"] is not None and c["edge"] >= min_edge]
+    if not solo_goles:
+        candidatos.append(
+            {
+                "pick": "EMPATE (X)",
+                "cuota": cuota_x,
+                "prob": round(markets["prob_x"] * 100, 1),
+                "prob_raw": markets["prob_x"],
+                "cuota_justa": markets["fair_x"],
+                "edge": markets.get("edge_draw"),
+                "min_prob_req": 0.28,
+            }
+        )
+
+    validos = [
+        c
+        for c in candidatos
+        if c["edge"] is not None
+        and c["edge"] >= min_edge
+        and c["prob_raw"] >= c["min_prob_req"]
+    ]
     resultado_exacto = {
         "marcador": markets["exact_score"],
         "prob": markets["exact_score_prob"],
         "cuota_justa": markets["exact_score_fair_odd"],
+        "top3": markets.get("top_exact_scores", []),
     }
 
     if not validos:
         return {
             "apostar": False,
             "pick": "NO APOSTAR",
-            "motivo": f"Ningún mercado supera el umbral mínimo de ventaja (+{min_edge * 100:.1f}%).",
+            "motivo": (
+                f"Ningún mercado cumple ambos filtros: ventaja mínima (+{min_edge * 100:.1f}%) "
+                f"y probabilidad mínima en goles ({min_prob_ou * 100:.0f}%)."
+            ),
             "resultado_exacto": resultado_exacto,
         }
 
@@ -643,6 +761,7 @@ def run_goal_matchup_poisson(
     goal_key: str,
     last_n: int = 10,
     league_avg_per_side: float = 1.35,
+    auto_league_avg: bool = True,
     max_lambda: float = 3.20,
     winamax_over25: float | None = None,
     winamax_under25: float | None = None,
@@ -663,25 +782,45 @@ def run_goal_matchup_poisson(
     away_id = away_team["id"]
 
     home_stats = goal_summarize_team_goals(
-        goal_fetch_team_results(home_id, goal_key, limit=50), home_id, last_n=last_n
+        goal_fetch_team_results(home_id, goal_key, limit=50),
+        home_id,
+        last_n=last_n,
+        prefer_venue="home",
     )
     away_stats = goal_summarize_team_goals(
-        goal_fetch_team_results(away_id, goal_key, limit=50), away_id, last_n=last_n
+        goal_fetch_team_results(away_id, goal_key, limit=50),
+        away_id,
+        last_n=last_n,
+        prefer_venue="away",
     )
 
-    base = league_avg_per_side if league_avg_per_side > 0 else 1.35
-    home_att = (home_stats["gf_avg"] / base) if home_stats["gf_avg"] > 0 else 1.0
-    home_def = (home_stats["ga_avg"] / base) if home_stats["ga_avg"] > 0 else 1.0
+    manual_base = league_avg_per_side if league_avg_per_side > 0 else 1.35
+    if auto_league_avg and home_stats["count"] > 0 and away_stats["count"] > 0:
+        observada = (home_stats["total_avg"] + away_stats["total_avg"]) / 4.0
+        base = max(0.75, min(2.10, (0.50 * observada) + (0.50 * manual_base)))
+    else:
+        base = manual_base
 
-    away_att = (away_stats["gf_avg"] / base) if away_stats["gf_avg"] > 0 else 1.0
-    away_def = (away_stats["ga_avg"] / base) if away_stats["ga_avg"] > 0 else 1.0
+    prior_weight = 2.5
+    n_h = max(1, home_stats["count"])
+    n_a = max(1, away_stats["count"])
 
-    raw_lam_home = home_att * away_def * base
-    raw_lam_away = away_att * home_def * base
+    gf_h_smooth = ((home_stats["gf_avg"] * n_h) + (base * prior_weight)) / (n_h + prior_weight)
+    ga_h_smooth = ((home_stats["ga_avg"] * n_h) + (base * prior_weight)) / (n_h + prior_weight)
+    gf_a_smooth = ((away_stats["gf_avg"] * n_a) + (base * prior_weight)) / (n_a + prior_weight)
+    ga_a_smooth = ((away_stats["ga_avg"] * n_a) + (base * prior_weight)) / (n_a + prior_weight)
+
+    home_att = gf_h_smooth / base
+    home_def = ga_h_smooth / base
+    away_att = gf_a_smooth / base
+    away_def = ga_a_smooth / base
+
+    raw_lam_home = home_att * away_def * base * 1.06
+    raw_lam_away = away_att * home_def * base * 0.96
 
     cap = max(0.5, float(max_lambda))
-    lam_home = min(max(0.10, raw_lam_home), cap)
-    lam_away = min(max(0.10, raw_lam_away), cap)
+    lam_home = min(max(0.15, raw_lam_home), cap)
+    lam_away = min(max(0.15, raw_lam_away), cap)
 
     warnings: list[str] = []
     if home_stats["count"] < last_n:
@@ -710,6 +849,7 @@ def run_goal_matchup_poisson(
         "away_team": away_team,
         "home_stats": home_stats,
         "away_stats": away_stats,
+        "base_used": round(base, 2),
         "markets": markets,
         "warnings": warnings,
     }
@@ -1017,8 +1157,8 @@ def calcular_xg_moderado(
     gf_v = min(max(gf_vis_10, 0.15), 4.2)
     gc_v = min(max(gc_vis_10, 0.15), 4.2)
 
-    xg_local = (gf_l + gc_v) / 2.0
-    xg_visitante = (gf_v + gc_l) / 2.0
+    xg_local = ((gf_l + gc_v) / 2.0) * 1.05
+    xg_visitante = ((gf_v + gc_l) / 2.0) * 0.95
 
     if goles_h2h_prom is not None and goles_h2h_prom > 0:
         h2h_mod = min(max(goles_h2h_prom, 0.4), 5.5)
@@ -1055,10 +1195,11 @@ def evaluar_entrada_25(
     cuota_over_25: float | None = None,
     cuota_under_25: float | None = None,
     min_edge: float = 0.05,
+    min_prob_ou: float = 0.60,
     min_cuota_over: float = 1.45,
     min_cuota_under: float = 1.45,
 ) -> dict:
-    """Evalúa +2.5 y -2.5 goles exigiendo ventaja mínima sobre la cuota."""
+    """Evalúa +2.5 y -2.5 goles exigiendo ventaja mínima y probabilidad mínima."""
     probs = probs_over_under_25(xg_local, xg_visitante)
     p_over = probs["p_over_25"]
     p_under = probs["p_under_25"]
@@ -1070,7 +1211,11 @@ def evaluar_entrada_25(
         imp_over = 1.0 / cuota_over_25
         edge_over = p_over - imp_over
         ev_over = (p_over * cuota_over_25) - 1.0
-        pasa_over = edge_over >= min_edge and cuota_over_25 >= min_cuota_over
+        pasa_over = (
+            edge_over >= min_edge
+            and p_over >= min_prob_ou
+            and cuota_over_25 >= min_cuota_over
+        )
         desglose.append(
             {
                 "Mercado": "+2.5 goles",
@@ -1097,7 +1242,11 @@ def evaluar_entrada_25(
         imp_under = 1.0 / cuota_under_25
         edge_under = p_under - imp_under
         ev_under = (p_under * cuota_under_25) - 1.0
-        pasa_under = edge_under >= min_edge and cuota_under_25 >= min_cuota_under
+        pasa_under = (
+            edge_under >= min_edge
+            and p_under >= min_prob_ou
+            and cuota_under_25 >= min_cuota_under
+        )
         desglose.append(
             {
                 "Mercado": "-2.5 goles",
@@ -1123,7 +1272,10 @@ def evaluar_entrada_25(
     if not opciones:
         return {
             "decision": "NO APOSTAR",
-            "motivo": "Ningún mercado supera el umbral mínimo de ventaja o cuota.",
+            "motivo": (
+                f"Ningún mercado supera ventaja (+{min_edge * 100:.1f}%), "
+                f"probabilidad mínima ({min_prob_ou * 100:.0f}%) y cuota mínima."
+            ),
             "xg_total": probs["xg_total"],
             "p_over_25": round(p_over * 100, 1),
             "p_under_25": round(p_under * 100, 1),
@@ -1159,6 +1311,7 @@ def renderizar_resultado(resultado: dict, partido_label: str) -> None:
         st.success(
             f"### ✅ APOSTAR → {resultado['mercado'].upper()}\n"
             f"**Cuota:** `{resultado['cuota']:.2f}` | "
+            f"**Prob. modelo:** `{resultado['prob_modelo']:.1f}%` | "
             f"**Ventaja:** `+{resultado['edge']:.1f}%` | "
             f"**EV:** `{resultado['ev']:+.3f}`"
         )
@@ -1278,7 +1431,12 @@ with tab_poisson:
     gp1, gp2 = st.columns(2)
     g_last_n = gp1.slider("Últimos partidos", min_value=5, max_value=20, value=10, key="goal_last_n")
     g_league_avg = gp2.number_input(
-        "Media goles/equipo", min_value=0.6, max_value=2.5, value=1.35, step=0.05, key="goal_league_avg"
+        "Media base goles/equipo", min_value=0.6, max_value=2.5, value=1.35, step=0.05, key="goal_league_avg"
+    )
+    g_auto_league = st.checkbox(
+        "Adaptar automáticamente la media de goles al ritmo real de ambos equipos",
+        value=True,
+        key="goal_auto_league",
     )
 
     go1, go2, go3 = st.columns(3)
@@ -1292,9 +1450,9 @@ with tab_poisson:
         "Cuota Under 2.5 Winamax", min_value=1.01, max_value=10.0, value=1.39, step=0.05, key="goal_cuota_u25"
     )
 
-    gl1, gl2 = st.columns(2)
+    gl1, gl2, gl3 = st.columns(3)
     g_max_lambda = gl1.slider(
-        "Límite máximo de lambda (λ) por equipo",
+        "Límite máximo λ",
         min_value=1.50,
         max_value=5.00,
         value=3.20,
@@ -1302,12 +1460,25 @@ with tab_poisson:
         key="goal_max_lambda",
     )
     g_min_edge_pct = gl2.slider(
-        "Ventaja mínima para marcar en verde (%)",
+        "Ventaja mínima (%)",
         min_value=1.0,
         max_value=25.0,
         value=5.0,
         step=0.5,
         key="goal_min_edge_pct",
+    )
+    g_min_prob_ou = gl3.slider(
+        "Prob. mínima +2.5/-2.5 (%)",
+        min_value=50.0,
+        max_value=80.0,
+        value=60.0,
+        step=1.0,
+        key="goal_min_prob_ou",
+    )
+    g_solo_goles = st.checkbox(
+        "Priorizar solo mercados de goles (+2.5 / -2.5) en el veredicto",
+        value=False,
+        key="goal_solo_goles",
     )
     g_nota = st.text_input("Nota rápida (opcional)", key="goal_nota_input")
 
@@ -1320,6 +1491,7 @@ with tab_poisson:
                 goal_key=goal_key_activa,
                 last_n=g_last_n,
                 league_avg_per_side=g_league_avg,
+                auto_league_avg=g_auto_league,
                 max_lambda=g_max_lambda,
                 winamax_over25=g_cuota_o25,
                 winamax_under25=g_cuota_u25,
@@ -1332,6 +1504,8 @@ with tab_poisson:
                 "cuota_o25": g_cuota_o25,
                 "cuota_u25": g_cuota_u25,
                 "min_edge": g_min_edge_pct / 100.0,
+                "min_prob_ou": g_min_prob_ou / 100.0,
+                "solo_goles": g_solo_goles,
                 "nota": g_nota,
                 "home_fallback": g_home_input,
                 "away_fallback": g_away_input,
@@ -1351,15 +1525,29 @@ with tab_poisson:
             cuota_o25=ultimo_g["cuota_o25"],
             cuota_u25=ultimo_g.get("cuota_u25", 1.39),
             min_edge=ultimo_g.get("min_edge", 0.05),
+            min_prob_ou=ultimo_g.get("min_prob_ou", 0.60),
+            solo_goles=ultimo_g.get("solo_goles", False),
         )
         ex = pron["resultado_exacto"]
+        top3_txt = " | ".join(
+            f"`{item['marcador']}` ({item['prob']:.1f}%)" for item in ex.get("top3", [])
+        )
 
         for aviso in res_g.get("warnings", []):
             st.warning(f"⚠️ {aviso}")
 
         st.caption(
             f"Equipos detectados: **{ht.get('name')}** (`{ht.get('country') or 'N/D'}`) "
-            f"vs **{at.get('name')}** (`{at.get('country') or 'N/D'}`)"
+            f"vs **{at.get('name')}** (`{at.get('country') or 'N/D'}`) · "
+            f"Media goles/equipo aplicada: `{res_g.get('base_used', 1.35)}`"
+        )
+
+        hs = res_g["home_stats"]
+        aws = res_g["away_stats"]
+        st.info(
+            f"**Consistencia en últimos {ultimo_g['last_n']} partidos:** "
+            f"{ht.get('name')} → **+2.5:** `{hs.get('over25_rate', 0)}%` / **-2.5:** `{hs.get('under25_rate', 0)}%` | "
+            f"{at.get('name')} → **+2.5:** `{aws.get('over25_rate', 0)}%` / **-2.5:** `{aws.get('under25_rate', 0)}%`"
         )
 
         gm1, gm2, gm3, gm4 = st.columns(4)
@@ -1383,13 +1571,13 @@ with tab_poisson:
                 f"**Cuota Winamax:** `{pron['cuota']:.2f}` | "
                 f"**Prob. modelo:** `{pron['prob']:.1f}%` (cuota justa `{pron['cuota_justa']}`) | "
                 f"**Ventaja:** `+{pron['edge'] * 100:.1f}%`\n\n"
-                f"**Marcador más probable:** `{ex['marcador']}` (`{ex['prob']:.1f}%` — cuota justa `{ex['cuota_justa']}`)"
+                f"**Top 3 marcadores exactos:** {top3_txt}"
             )
         else:
             st.warning(
                 f"### ⛔ NO APOSTAR | RESULTADO EXACTO MÁS PROBABLE → `{ex['marcador']}`\n"
                 f"{pron['motivo']}\n\n"
-                f"**Marcador más probable:** `{ex['marcador']}` (`{ex['prob']:.1f}%` — cuota justa `{ex['cuota_justa']}`)"
+                f"**Top 3 marcadores exactos:** {top3_txt}"
             )
 
         if st.button("Guardar en registro", key="btn_save_goal_log", width="stretch"):
@@ -1411,15 +1599,15 @@ with tab_poisson:
 
         with st.expander("Últimos partidos usados en el cálculo"):
             st.write(
-                f"**{ht.get('name')}** ({res_g['home_stats']['count']} PJ — "
-                f"GF media: {res_g['home_stats']['gf_avg']:.2f} | GC media: {res_g['home_stats']['ga_avg']:.2f})"
+                f"**{ht.get('name')}** ({hs['count']} PJ — "
+                f"GF pond.: {hs['gf_avg']:.2f} | GC pond.: {hs['ga_avg']:.2f})"
             )
-            st.dataframe(pd.DataFrame(res_g["home_stats"]["matches"]), width="stretch")
+            st.dataframe(pd.DataFrame(hs["matches"]), width="stretch")
             st.write(
-                f"**{at.get('name')}** ({res_g['away_stats']['count']} PJ — "
-                f"GF media: {res_g['away_stats']['gf_avg']:.2f} | GC media: {res_g['away_stats']['ga_avg']:.2f})"
+                f"**{at.get('name')}** ({aws['count']} PJ — "
+                f"GF pond.: {aws['gf_avg']:.2f} | GC pond.: {aws['ga_avg']:.2f})"
             )
-            st.dataframe(pd.DataFrame(res_g["away_stats"]["matches"]), width="stretch")
+            st.dataframe(pd.DataFrame(aws["matches"]), width="stretch")
 
 with tab_detector:
     st.subheader("1. Captura de partido (opcional)")
@@ -1440,6 +1628,13 @@ with tab_detector:
         psm = st.selectbox("Modo de segmentación OCR (PSM)", options=[11, 6, 4, 3], index=0)
         min_edge_pct = st.slider(
             "Ventaja mínima sobre cuota (%)", min_value=1.0, max_value=25.0, value=5.0, step=0.5
+        )
+        min_prob_det_pct = st.slider(
+            "Probabilidad mínima del modelo en +2.5 / -2.5 (%)",
+            min_value=50.0,
+            max_value=80.0,
+            value=60.0,
+            step=1.0,
         )
         min_cuota_over = st.slider(
             "Cuota mínima en +2.5 goles", min_value=1.30, max_value=2.50, value=1.45, step=0.05
@@ -1645,6 +1840,7 @@ with tab_detector:
         cuota_over_25=cuota_over_25 if usar_over else None,
         cuota_under_25=cuota_under_25 if usar_under else None,
         min_edge=min_edge_pct / 100.0,
+        min_prob_ou=min_prob_det_pct / 100.0,
         min_cuota_over=min_cuota_over,
         min_cuota_under=min_cuota_under,
     )
