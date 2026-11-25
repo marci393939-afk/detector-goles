@@ -754,7 +754,11 @@ def seleccionar_pronostico_goal(
         }
 
     req_over = min_prob_ou if cuota_o25 < 2.0 else max(0.48, min_prob_ou - 0.08)
-    req_under = max(min_prob_under, min_prob_ou) if cuota_u25 < 2.0 else max(0.56, min_prob_under - 0.02)
+    req_under = (
+        max(min_prob_under, min_prob_ou)
+        if cuota_u25 < 2.0
+        else max(0.56, min_prob_under - 0.02)
+    )
 
     candidatos = [
         {
@@ -1465,7 +1469,9 @@ tab_poisson, tab_detector, tab_registro = st.tabs(
 
 with tab_poisson:
     st.subheader("Modelo Poisson — GOAL API")
-    st.caption("Modelo pensado para análisis prepartido (10 últimos encuentros) con filtros reforzados en -2.5 goles.")
+    st.caption(
+        "Modelo pensado para análisis prepartido (10 últimos encuentros) con filtros reforzados en -2.5 goles."
+    )
     goal_key_manual = st.text_input(
         "GOAL_KEY (opcional si ya está en Secrets o entorno)",
         type="password",
@@ -1482,7 +1488,12 @@ with tab_poisson:
         on_change=_aplicar_preset_goal,
     )
     col_p2.markdown("<br>", unsafe_allow_html=True)
-    col_p2.button("🧹 Limpiar", key="btn_clear_goal", on_click=_limpiar_partido_goal, width="stretch")
+    col_p2.button(
+        "🧹 Limpiar",
+        key="btn_clear_goal",
+        on_click=_limpiar_partido_goal,
+        width="stretch",
+    )
 
     archivo_goal = st.file_uploader(
         "Sube una captura del partido para sugerir los equipos en Poisson",
@@ -1524,9 +1535,16 @@ with tab_poisson:
     g_country_input = gc3.text_input("País (opcional)", key="goal_country_input")
 
     gp1, gp2 = st.columns(2)
-    g_last_n = gp1.slider("Últimos partidos", min_value=6, max_value=15, value=10, key="goal_last_n")
+    g_last_n = gp1.slider(
+        "Últimos partidos", min_value=6, max_value=15, value=10, key="goal_last_n"
+    )
     g_league_avg = gp2.number_input(
-        "Media base goles/equipo", min_value=0.6, max_value=2.5, value=1.30, step=0.05, key="goal_league_avg"
+        "Media base goles/equipo",
+        min_value=0.6,
+        max_value=2.5,
+        value=1.30,
+        step=0.05,
+        key="goal_league_avg",
     )
     g_auto_league = st.checkbox(
         "Adaptar automáticamente la media de goles al ritmo real de ambos equipos",
@@ -1536,13 +1554,28 @@ with tab_poisson:
 
     go1, go2, go3 = st.columns(3)
     g_cuota_x = go1.number_input(
-        "Cuota Empate (X) Winamax", min_value=1.01, max_value=15.0, value=3.90, step=0.05, key="goal_cuota_x"
+        "Cuota Empate (X) Winamax",
+        min_value=1.01,
+        max_value=15.0,
+        value=3.90,
+        step=0.05,
+        key="goal_cuota_x",
     )
     g_cuota_o25 = go2.number_input(
-        "Cuota Over 2.5 Winamax", min_value=1.01, max_value=10.0, value=2.80, step=0.05, key="goal_cuota_o25"
+        "Cuota Over 2.5 Winamax",
+        min_value=1.01,
+        max_value=10.0,
+        value=2.80,
+        step=0.05,
+        key="goal_cuota_o25",
     )
     g_cuota_u25 = go3.number_input(
-        "Cuota Under 2.5 Winamax", min_value=1.01, max_value=10.0, value=1.39, step=0.05, key="goal_cuota_u25"
+        "Cuota Under 2.5 Winamax",
+        min_value=1.01,
+        max_value=10.0,
+        value=1.39,
+        step=0.05,
+        key="goal_cuota_u25",
     )
 
     gl1, gl2, gl3, gl4 = st.columns(4)
@@ -1599,7 +1632,12 @@ with tab_poisson:
     )
     g_nota = st.text_input("Nota rápida (opcional)", key="goal_nota_input")
 
-    if st.button("Calcular probabilidades", type="primary", key="btn_calc_goal_poisson", width="stretch"):
+    if st.button(
+        "Calcular probabilidades",
+        type="primary",
+        key="btn_calc_goal_poisson",
+        width="stretch",
+    ):
         try:
             res_g = run_goal_matchup_poisson(
                 home_query=g_home_input,
@@ -1678,14 +1716,34 @@ with tab_poisson:
         )
 
         gm1, gm2, gm3, gm4 = st.columns(4)
-        gm1.metric("Goles esperados", f"{mg['expected_total_goals']}", f"λ {mg['lam_home']} / {mg['lam_away']}")
+        gm1.metric(
+            "Goles esperados",
+            f"{mg['expected_total_goals']}",
+            f"λ {mg['lam_home']} / {mg['lam_away']}",
+        )
         gm2.metric("Prob. Empate (X)", f"{mg['prob_x']*100:.1f}%", f"Cuota justa: {mg['fair_x']}")
-        gm3.metric("Prob. Over 2.5", f"{mg['prob_over_25']*100:.1f}%", f"Cuota justa: {mg['fair_over_25']}")
-        gm4.metric("Prob. Under 2.5", f"{mg['prob_under_25']*100:.1f}%", f"Cuota justa: {mg['fair_under_25']}")
+        gm3.metric(
+            "Prob. Over 2.5",
+            f"{mg['prob_over_25']*100:.1f}%",
+            f"Cuota justa: {mg['fair_over_25']}",
+        )
+        gm4.metric(
+            "Prob. Under 2.5",
+            f"{mg['prob_under_25']*100:.1f}%",
+            f"Cuota justa: {mg['fair_under_25']}",
+        )
 
         ge1, ge2, ge3 = st.columns(3)
-        ge1.metric("Edge Empate (X)", f"{(mg['edge_draw'] or 0)*100:+.1f}%", f"Winamax: {ultimo_g['cuota_x']:.2f}")
-        ge2.metric("Edge Over 2.5", f"{(mg['edge_over_25'] or 0)*100:+.1f}%", f"Winamax: {ultimo_g['cuota_o25']:.2f}")
+        ge1.metric(
+            "Edge Empate (X)",
+            f"{(mg['edge_draw'] or 0)*100:+.1f}%",
+            f"Winamax: {ultimo_g['cuota_x']:.2f}",
+        )
+        ge2.metric(
+            "Edge Over 2.5",
+            f"{(mg['edge_over_25'] or 0)*100:+.1f}%",
+            f"Winamax: {ultimo_g['cuota_o25']:.2f}",
+        )
         ge3.metric(
             "Edge Under 2.5",
             f"{(mg['edge_under_25'] or 0)*100:+.1f}%",
@@ -1752,9 +1810,15 @@ with tab_detector:
         auto_fetch = st.checkbox(
             "Buscar promedios automáticamente al subir una captura nueva", value=True
         )
-        psm = st.selectbox("Modo de segmentación OCR (PSM)", options=[11, 6, 4, 3], index=0)
+        psm = st.selectbox(
+            "Modo de segmentación OCR (PSM)", options=[11, 6, 4, 3], index=0
+        )
         min_edge_pct = st.slider(
-            "Ventaja mínima sobre cuota (%)", min_value=1.0, max_value=25.0, value=5.0, step=0.5
+            "Ventaja mínima sobre cuota (%)",
+            min_value=1.0,
+            max_value=25.0,
+            value=5.0,
+            step=0.5,
         )
         min_prob_det_pct = st.slider(
             "Probabilidad mínima del modelo en +2.5 (%)",
@@ -1771,13 +1835,25 @@ with tab_detector:
             step=1.0,
         )
         min_cuota_over = st.slider(
-            "Cuota mínima en +2.5 goles", min_value=1.30, max_value=2.50, value=1.45, step=0.05
+            "Cuota mínima en +2.5 goles",
+            min_value=1.30,
+            max_value=2.50,
+            value=1.45,
+            step=0.05,
         )
         min_cuota_under = st.slider(
-            "Cuota mínima en -2.5 goles", min_value=1.30, max_value=3.00, value=1.45, step=0.05
+            "Cuota mínima en -2.5 goles",
+            min_value=1.30,
+            max_value=3.00,
+            value=1.45,
+            step=0.05,
         )
         max_cuota_det = st.slider(
-            "Cuota máxima en +2.5 / -2.5 goles", min_value=2.00, max_value=4.00, value=2.60, step=0.05
+            "Cuota máxima en +2.5 / -2.5 goles",
+            min_value=2.00,
+            max_value=4.00,
+            value=2.60,
+            step=0.05,
         )
 
     texto_ocr = ""
@@ -1808,7 +1884,9 @@ with tab_detector:
     st.subheader("2. Partido y cuotas manuales de Winamax")
     col1, col2 = st.columns(2)
     with col1:
-        equipo_local = st.text_input("Equipo Local", value=local_sugerido, key="equipo_local_input")
+        equipo_local = st.text_input(
+            "Equipo Local", value=local_sugerido, key="equipo_local_input"
+        )
     with col2:
         equipo_visitante = st.text_input(
             "Equipo Visitante", value=visitante_sugerido, key="equipo_visitante_input"
@@ -1827,7 +1905,9 @@ with tab_detector:
             return
 
         if not loc.strip() or not vis.strip():
-            st.session_state["api_warn_msg"] = "Introduce ambos equipos antes de buscar estadísticas."
+            st.session_state["api_warn_msg"] = (
+                "Introduce ambos equipos antes de buscar estadísticas."
+            )
             return
 
         try:
@@ -1859,7 +1939,9 @@ with tab_detector:
             if h2h and h2h["partidos"] >= 2:
                 st.session_state["goles_h2h_prom"] = float(h2h["goles_prom"])
                 st.session_state["usar_h2h"] = True
-                h2h_txt = f" | H2H ({h2h['partidos']} partidos): {h2h['goles_prom']:.2f} goles/partido"
+                h2h_txt = (
+                    f" | H2H ({h2h['partidos']} partidos): {h2h['goles_prom']:.2f} goles/partido"
+                )
             else:
                 st.session_state["usar_h2h"] = False
                 h2h_txt = " | H2H sin datos suficientes"
@@ -1883,7 +1965,9 @@ with tab_detector:
         par_id = f"{archivo.file_id}_{equipo_local.strip()}_{equipo_visitante.strip()}"
         if st.session_state.get("ultimo_auto_fetch") != par_id:
             with st.spinner("Consultando últimos 10 partidos en API-Football..."):
-                actualizar_estadisticas_desde_api(equipo_local, equipo_visitante, api_key_activa)
+                actualizar_estadisticas_desde_api(
+                    equipo_local, equipo_visitante, api_key_activa
+                )
             st.session_state["ultimo_auto_fetch"] = par_id
 
     if st.button("🔄 Buscar promedios reales en API-Football"):
@@ -2013,4 +2097,4 @@ with tab_registro:
         )
         if col_d2.button("Limpiar tabla"):
             st.session_state["analisis_log"] = []
-            st.rerun(
+            st.rerun()
