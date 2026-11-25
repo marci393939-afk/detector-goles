@@ -476,10 +476,6 @@ def goal_summarize_team_goals(
     last_n: int = 10,
     prefer_venue: str | None = None,
 ) -> dict:
-    """
-    Calcula medias ponderadas por recencia con recorte amplio (5 goles),
-    ajuste por condición (Local/Visitante) y tasas reales de Over/Under 2.5.
-    """
     subset = matches[:last_n]
     if not subset:
         return {
@@ -689,8 +685,8 @@ def _consistencia_respalda(
     mercado: str,
 ) -> bool:
     """
-    Exige que el historial reciente respalde el mercado en ambos equipos
-    para evitar picks apoyados solo en un lado.
+    Respaldo histórico suave para no bloquear picks con buen edge y xG:
+    basta con que la media combinada o alguno de los dos equipos apoye la tendencia.
     """
     if not home_stats or not away_stats:
         return True
@@ -700,14 +696,26 @@ def _consistencia_respalda(
     if "OVER" in mercado or "+2.5" in mercado:
         h_over = home_stats.get("over25_rate", 0.0)
         a_over = away_stats.get("over25_rate", 0.0)
-        return ((h_over + a_over) / 2.0) >= 45.0 and min(h_over, a_over) >= 30.0
+        return ((h_over + a_over) / 2.0) >= 30.0 or max(h_over, a_over) >= 40.0
 
     if "UNDER" in mercado or "-2.5" in mercado:
         h_under = home_stats.get("under25_rate", 0.0)
         a_under = away_stats.get("under25_rate", 0.0)
-        return ((h_under + a_under) / 2.0) >= 45.0 and min(h_under, a_under) >= 30.0
+        return ((h_under + a_under) / 2.0) >= 32.0 or max(h_under, a_under) >= 40.0
 
     return True
+
+
+def _calidad_pick(
+    prob_raw: float,
+    edge_val: float,
+    xg_total: float,
+    es_over: bool,
+) -> float:
+    """Puntuación compuesta de calidad: ventaja (edge) + separación de xG respecto a 2.5."""
+    sep = (xg_total - 2.50) if es_over else (2.50 - xg_total)
+    sep_bonus = max(-0.08, min(0.15, sep * 0.12))
+    return (edge_val * 1.40) + ((prob_raw - 0.50) * 0.35) + sep_bonus
 
 
 def seleccionar_pronostico_goal(
@@ -715,20 +723,20 @@ def seleccionar_pronostico_goal(
     cuota_x: float,
     cuota_o25: float,
     cuota_u25: float,
-    min_edge: float = 0.05,
-    min_prob_ou: float = 0.56,
-    min_prob_under: float = 0.60,
-    max_cuota_ou: float = 2.60,
+    min_edge: float = 0.025,
+    min_prob_ou: float = 0.50,
+    min_prob_under: float = 0.52,
+    max_cuota_ou: float = 2.85,
     solo_goles: bool = True,
     home_stats: dict | None = None,
     away_stats: dict | None = None,
-    exigir_consistencia: bool = True,
+    exigir_consistencia: bool = False,
     mismo_equipo: bool = False,
     muestra_insuficiente: bool = False,
 ) -> dict:
     """
-    Evalúa +2.5 / -2.5 goles aplicando un filtro más exigente en -2.5 goles
-    y bloqueando cuotas trampa, equipos repetidos o muestras cortas.
+    Optimizado para mayor flujo con mejor calidad: prioriza ventaja (edge) real
+    y separación de xG respecto a 2.5 sin estrangular partidos válidos.
     """
     resultado_exacto = {
         "marcador": markets["exact_score"],
@@ -753,12 +761,17 @@ def seleccionar_pronostico_goal(
             "resultado_exacto": resultado_exacto,
         }
 
-    req_over = min_prob_ou if cuota_o25 < 2.0 else max(0.48, min_prob_ou - 0.08)
+    xg_total = float(markets.get("expected_total_goals", 2.50))
+
+    req_over = min_prob_ou if cuota_o25 < 2.0 else max(0.42, min_prob_ou - 0.08)
     req_under = (
         max(min_prob_under, min_prob_ou)
         if cuota_u25 < 2.0
-        else max(0.56, min_prob_under - 0.02)
+        else max(0.44, min_prob_under - 0.08)
     )
+
+    separacion_over = xg_total >= 2.52 or (cuota_o25 >= 1.95 and xg_total >= 2.40)
+    separacion_under = xg_total <= 2.48 or (cuota_u25 >= 1.95 and xg_total <= 2.60)
 
     candidatos = [
         {
@@ -771,6 +784,13 @@ def seleccionar_pronostico_goal(
             "min_prob_req": req_over,
             "min_edge_req": min_edge,
             "max_cuota_req": max_cuota_ou,
+            "separacion_ok": separacion_over,
+            "calidad": _calidad_pick(
+                markets["prob_over_25"],
+                markets.get("edge_over_25") or -1.0,
+                xg_total,
+                True,
+            ),
         },
         {
             "pick": "UNDER 2.5 GOLES",
@@ -780,8 +800,15 @@ def seleccionar_pronostico_goal(
             "cuota_justa": markets["fair_under_25"],
             "edge": markets.get("edge_under_25"),
             "min_prob_req": req_under,
-            "min_edge_req": max(min_edge, 0.05),
+            "min_edge_req": min_edge,
             "max_cuota_req": max_cuota_ou,
+            "separacion_ok": separacion_under,
+            "calidad": _calidad_pick(
+                markets["prob_under_25"],
+                markets.get("edge_under_25") or -1.0,
+                xg_total,
+                False,
+            ),
         },
     ]
 
@@ -794,9 +821,11 @@ def seleccionar_pronostico_goal(
                 "prob_raw": markets["prob_x"],
                 "cuota_justa": markets["fair_x"],
                 "edge": markets.get("edge_draw"),
-                "min_prob_req": 0.28,
+                "min_prob_req": 0.25,
                 "min_edge_req": min_edge,
                 "max_cuota_req": 99.0,
+                "separacion_ok": True,
+                "calidad": (markets.get("edge_draw") or -1.0) * 1.2,
             }
         )
 
@@ -807,6 +836,7 @@ def seleccionar_pronostico_goal(
             and c["edge"] >= c["min_edge_req"]
             and c["prob_raw"] >= c["min_prob_req"]
             and c["cuota"] <= c["max_cuota_req"]
+            and c["separacion_ok"]
         )
         cumple_hist = (
             True
@@ -821,14 +851,14 @@ def seleccionar_pronostico_goal(
             "apostar": False,
             "pick": "NO APOSTAR",
             "motivo": (
-                f"No pasa el filtro de seguridad (ventaja mín. +{min_edge * 100:.1f}%, "
-                f"prob. +2.5 desde {req_over * 100:.0f}% / -2.5 desde {req_under * 100:.0f}%, "
-                f"cuota máx. {max_cuota_ou:.2f} y consistencia en ambos equipos)."
+                f"Sin ventaja suficiente o xG demasiado neutro frente a 2.5 (xG esp.: {xg_total:.2f}, "
+                f"ventaja mín. +{min_edge * 100:.1f}%, prob. +2.5 desde {req_over * 100:.0f}% / "
+                f"-2.5 desde {req_under * 100:.0f}%, cuota máx. {max_cuota_ou:.2f})."
             ),
             "resultado_exacto": resultado_exacto,
         }
 
-    mejor = max(validos, key=lambda c: c["edge"])
+    mejor = max(validos, key=lambda c: c["calidad"])
     return {"apostar": True, "resultado_exacto": resultado_exacto, **mejor}
 
 
@@ -981,7 +1011,6 @@ def registrar_analisis_goal(
 
 
 def preparar_imagen_ocr(imagen: Image.Image) -> Image.Image:
-    """Mejora escala y contraste para facilitar la lectura de nombres de equipos."""
     img = imagen.convert("RGB")
     w, h = img.size
     if max(w, h) < 1600:
@@ -996,7 +1025,6 @@ def preparar_imagen_ocr(imagen: Image.Image) -> Image.Image:
 
 @st.cache_data(show_spinner=False)
 def ejecutar_ocr_bytes(img_bytes: bytes, psm: int = 11) -> str:
-    """Ejecuta Tesseract OCR sobre los bytes de la imagen."""
     imagen = Image.open(BytesIO(img_bytes))
     procesada = preparar_imagen_ocr(imagen)
     config = f"--oem 3 --psm {psm}"
@@ -1004,7 +1032,6 @@ def ejecutar_ocr_bytes(img_bytes: bytes, psm: int = 11) -> str:
 
 
 def _es_token_basura_ocr(token: str) -> bool:
-    """Detecta tokens cortos deformados o repeticiones sin sentido."""
     if ":" in token or ";" in token:
         return True
     limpio = re.sub(r"[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ]", "", token)
@@ -1018,7 +1045,6 @@ def _es_token_basura_ocr(token: str) -> bool:
 
 
 def _es_candidato_equipo_valido(candidato: str) -> bool:
-    """Valida que un candidato parezca un nombre de equipo y no frase de interfaz/ruido."""
     limpio = re.sub(r"\s+", " ", candidato).strip()
     if len(limpio) < 4 or len(limpio) > 30:
         return False
@@ -1044,7 +1070,6 @@ def _es_candidato_equipo_valido(candidato: str) -> bool:
 
 
 def limpiar_lineas_ocr(texto_ocr: str) -> list[str]:
-    """Limpia el texto devuelto por Tesseract y descarta ruido de interfaz."""
     lineas_limpias = []
     for linea in texto_ocr.splitlines():
         limpia = linea.strip()
@@ -1086,7 +1111,6 @@ def limpiar_lineas_ocr(texto_ocr: str) -> list[str]:
 
 
 def _separar_dos_equipos_en_linea(texto: str) -> list[str]:
-    """Divide una línea cuando contiene dos nombres de equipos pegados en horizontal."""
     limpio = re.sub(r"\s+", " ", texto).strip()
     if not limpio:
         return []
@@ -1187,7 +1211,6 @@ def _extraer_equipos_de_linea(linea: str) -> list[str]:
 
 
 def sugerir_equipos_candidatos(texto_ocr: str) -> tuple[str, str]:
-    """Sugiere equipo local y visitante válidos o devuelve vacío si el OCR no es fiable."""
     lineas = limpiar_lineas_ocr(texto_ocr)
     candidatos_cruce: list[str] = []
     equipos: list[str] = []
@@ -1236,10 +1259,6 @@ def calcular_xg_moderado(
     goles_h2h_prom: float | None = None,
     peso_h2h: float = 0.12,
 ) -> tuple[float, float]:
-    """
-    Calcula goles esperados moderando extremos con medias de 10 partidos
-    y un peso ligero opcional de enfrentamientos directos (H2H).
-    """
     gf_l = min(max(gf_local_10, 0.20), 4.2)
     gc_l = min(max(gc_local_10, 0.20), 4.2)
     gf_v = min(max(gf_vis_10, 0.20), 4.2)
@@ -1261,7 +1280,6 @@ def calcular_xg_moderado(
 
 
 def probs_over_under_25(xg_local: float, xg_visitante: float) -> dict[str, float]:
-    """Calcula P(-2.5) y P(+2.5) sumando probabilidades de goles totales 0, 1 y 2."""
     total_xg = max(0.10, xg_local + xg_visitante)
     p_0 = poisson_pmf(0, total_xg)
     p_1 = poisson_pmf(1, total_xg)
@@ -1282,15 +1300,16 @@ def evaluar_entrada_25(
     xg_visitante: float,
     cuota_over_25: float | None = None,
     cuota_under_25: float | None = None,
-    min_edge: float = 0.05,
-    min_prob_ou: float = 0.56,
-    min_prob_under: float = 0.60,
-    min_cuota_over: float = 1.45,
-    min_cuota_under: float = 1.45,
-    max_cuota_ou: float = 2.60,
+    min_edge: float = 0.025,
+    min_prob_ou: float = 0.50,
+    min_prob_under: float = 0.52,
+    min_cuota_over: float = 1.40,
+    min_cuota_under: float = 1.40,
+    max_cuota_ou: float = 2.85,
 ) -> dict:
-    """Evalúa +2.5 y -2.5 goles exigiendo mayor colchón en -2.5 y tope de cuota."""
+    """Evalúa +2.5 y -2.5 goles optimizando flujo y calidad vía ventaja (edge) y xG."""
     probs = probs_over_under_25(xg_local, xg_visitante)
+    xg_total = probs["xg_total"]
     p_over = probs["p_over_25"]
     p_under = probs["p_under_25"]
 
@@ -1301,10 +1320,13 @@ def evaluar_entrada_25(
         imp_over = 1.0 / cuota_over_25
         edge_over = p_over - imp_over
         ev_over = (p_over * cuota_over_25) - 1.0
-        req_over = min_prob_ou if cuota_over_25 < 2.0 else max(0.48, min_prob_ou - 0.08)
+        req_over = min_prob_ou if cuota_over_25 < 2.0 else max(0.42, min_prob_ou - 0.08)
+        sep_over = xg_total >= 2.52 or (cuota_over_25 >= 1.95 and xg_total >= 2.40)
+        calidad_over = _calidad_pick(p_over, edge_over, xg_total, True)
         pasa_over = (
             edge_over >= min_edge
             and p_over >= req_over
+            and sep_over
             and min_cuota_over <= cuota_over_25 <= max_cuota_ou
         )
         desglose.append(
@@ -1326,6 +1348,7 @@ def evaluar_entrada_25(
                     "prob_implicita": round(imp_over * 100, 1),
                     "edge": round(edge_over * 100, 1),
                     "ev": round(ev_over, 3),
+                    "calidad": calidad_over,
                 }
             )
 
@@ -1336,12 +1359,14 @@ def evaluar_entrada_25(
         req_under = (
             max(min_prob_under, min_prob_ou)
             if cuota_under_25 < 2.0
-            else max(0.56, min_prob_under - 0.02)
+            else max(0.44, min_prob_under - 0.08)
         )
-        req_edge_under = max(min_edge, 0.05)
+        sep_under = xg_total <= 2.48 or (cuota_under_25 >= 1.95 and xg_total <= 2.60)
+        calidad_under = _calidad_pick(p_under, edge_under, xg_total, False)
         pasa_under = (
-            edge_under >= req_edge_under
+            edge_under >= min_edge
             and p_under >= req_under
+            and sep_under
             and min_cuota_under <= cuota_under_25 <= max_cuota_ou
         )
         desglose.append(
@@ -1363,6 +1388,7 @@ def evaluar_entrada_25(
                     "prob_implicita": round(imp_under * 100, 1),
                     "edge": round(edge_under * 100, 1),
                     "ev": round(ev_under, 3),
+                    "calidad": calidad_under,
                 }
             )
 
@@ -1370,17 +1396,17 @@ def evaluar_entrada_25(
         return {
             "decision": "NO APOSTAR",
             "motivo": (
-                f"Ningún mercado pasa el filtro de seguridad (ventaja mín. +{min_edge * 100:.1f}%, "
-                f"prob. +2.5 desde {min_prob_ou * 100:.0f}% / -2.5 desde {min_prob_under * 100:.0f}%, "
-                f"cuota máx. {max_cuota_ou:.2f})."
+                f"Sin ventaja suficiente o xG demasiado neutro frente a 2.5 (xG esp.: {xg_total:.2f}, "
+                f"ventaja mín. +{min_edge * 100:.1f}%, prob. +2.5 desde {min_prob_ou * 100:.0f}% / "
+                f"-2.5 desde {min_prob_under * 100:.0f}%, cuota máx. {max_cuota_ou:.2f})."
             ),
-            "xg_total": probs["xg_total"],
+            "xg_total": xg_total,
             "p_over_25": round(p_over * 100, 1),
             "p_under_25": round(p_under * 100, 1),
             "desglose": desglose,
         }
 
-    mejor = max(opciones, key=lambda x: x["ev"])
+    mejor = max(opciones, key=lambda x: x["calidad"])
     return {
         "decision": "APOSTAR",
         "mercado": mejor["mercado"],
@@ -1389,7 +1415,7 @@ def evaluar_entrada_25(
         "prob_implicita": mejor["prob_implicita"],
         "edge": mejor["edge"],
         "ev": mejor["ev"],
-        "xg_total": probs["xg_total"],
+        "xg_total": xg_total,
         "p_over_25": round(p_over * 100, 1),
         "p_under_25": round(p_under * 100, 1),
         "desglose": desglose,
@@ -1397,7 +1423,6 @@ def evaluar_entrada_25(
 
 
 def renderizar_resultado(resultado: dict, partido_label: str) -> None:
-    """Muestra el veredicto directo (+2.5 goles, -2.5 goles o NO APOSTAR) y métricas."""
     st.markdown(f"**Partido:** {partido_label}")
 
     r1, r2, r3 = st.columns(3)
@@ -1470,7 +1495,7 @@ tab_poisson, tab_detector, tab_registro = st.tabs(
 with tab_poisson:
     st.subheader("Modelo Poisson — GOAL API")
     st.caption(
-        "Modelo pensado para análisis prepartido (10 últimos encuentros) con filtros reforzados en -2.5 goles."
+        "Modelo prepartido (10 últimos encuentros) ajustado para mayor flujo con selección por ventaja (edge) y separación de xG."
     )
     goal_key_manual = st.text_input(
         "GOAL_KEY (opcional si ya está en Secrets o entorno)",
@@ -1591,23 +1616,23 @@ with tab_poisson:
         "Ventaja mínima (%)",
         min_value=1.0,
         max_value=25.0,
-        value=5.0,
+        value=2.5,
         step=0.5,
         key="goal_min_edge_pct",
     )
     g_min_prob_ou = gl3.slider(
         "Prob. mínima +2.5 (%)",
-        min_value=45.0,
+        min_value=40.0,
         max_value=80.0,
-        value=56.0,
+        value=50.0,
         step=1.0,
         key="goal_min_prob_ou",
     )
     g_min_prob_under = gl4.slider(
         "Prob. mínima -2.5 (%)",
-        min_value=50.0,
+        min_value=40.0,
         max_value=80.0,
-        value=60.0,
+        value=52.0,
         step=1.0,
         key="goal_min_prob_under",
     )
@@ -1615,7 +1640,7 @@ with tab_poisson:
         "Cuota máx. +2.5 / -2.5",
         min_value=2.00,
         max_value=4.00,
-        value=2.60,
+        value=2.85,
         step=0.05,
         key="goal_max_cuota_ou",
     )
@@ -1627,7 +1652,7 @@ with tab_poisson:
     )
     g_exigir_cons = gc_f2.checkbox(
         "Exigir respaldo en % histórico de ambos equipos",
-        value=True,
+        value=False,
         key="goal_exigir_cons",
     )
     g_nota = st.text_input("Nota rápida (opcional)", key="goal_nota_input")
@@ -1684,14 +1709,14 @@ with tab_poisson:
             cuota_x=ultimo_g["cuota_x"],
             cuota_o25=ultimo_g["cuota_o25"],
             cuota_u25=ultimo_g.get("cuota_u25", 1.39),
-            min_edge=ultimo_g.get("min_edge", 0.05),
-            min_prob_ou=ultimo_g.get("min_prob_ou", 0.56),
-            min_prob_under=ultimo_g.get("min_prob_under", 0.60),
-            max_cuota_ou=ultimo_g.get("max_cuota_ou", 2.60),
+            min_edge=ultimo_g.get("min_edge", 0.025),
+            min_prob_ou=ultimo_g.get("min_prob_ou", 0.50),
+            min_prob_under=ultimo_g.get("min_prob_under", 0.52),
+            max_cuota_ou=ultimo_g.get("max_cuota_ou", 2.85),
             solo_goles=ultimo_g.get("solo_goles", True),
             home_stats=hs,
             away_stats=aws,
-            exigir_consistencia=ultimo_g.get("exigir_consistencia", True),
+            exigir_consistencia=ultimo_g.get("exigir_consistencia", False),
             mismo_equipo=res_g.get("mismo_equipo", False),
             muestra_insuficiente=res_g.get("muestra_insuficiente", False),
         )
@@ -1817,42 +1842,42 @@ with tab_detector:
             "Ventaja mínima sobre cuota (%)",
             min_value=1.0,
             max_value=25.0,
-            value=5.0,
+            value=2.5,
             step=0.5,
         )
         min_prob_det_pct = st.slider(
             "Probabilidad mínima del modelo en +2.5 (%)",
-            min_value=45.0,
+            min_value=40.0,
             max_value=80.0,
-            value=56.0,
+            value=50.0,
             step=1.0,
         )
         min_prob_under_det_pct = st.slider(
             "Probabilidad mínima del modelo en -2.5 (%)",
-            min_value=50.0,
+            min_value=40.0,
             max_value=80.0,
-            value=60.0,
+            value=52.0,
             step=1.0,
         )
         min_cuota_over = st.slider(
             "Cuota mínima en +2.5 goles",
             min_value=1.30,
             max_value=2.50,
-            value=1.45,
+            value=1.40,
             step=0.05,
         )
         min_cuota_under = st.slider(
             "Cuota mínima en -2.5 goles",
             min_value=1.30,
             max_value=3.00,
-            value=1.45,
+            value=1.40,
             step=0.05,
         )
         max_cuota_det = st.slider(
             "Cuota máxima en +2.5 / -2.5 goles",
             min_value=2.00,
             max_value=4.00,
-            value=2.60,
+            value=2.85,
             step=0.05,
         )
 
