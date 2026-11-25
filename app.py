@@ -713,15 +713,41 @@ def seleccionar_pronostico_goal(
     cuota_u25: float,
     min_edge: float = 0.04,
     min_prob_ou: float = 0.55,
+    max_cuota_ou: float = 2.60,
     solo_goles: bool = True,
     home_stats: dict | None = None,
     away_stats: dict | None = None,
     exigir_consistencia: bool = True,
+    mismo_equipo: bool = False,
+    muestra_insuficiente: bool = False,
 ) -> dict:
     """
-    Evalúa +2.5 / -2.5 goles con filtros equilibrados para sacar más picks útiles
-    sin perder criterio, flexibilizando el mínimo de probabilidad en cuotas >= 2.00.
+    Evalúa +2.5 / -2.5 goles evitando cuotas trampa muy altas (> max_cuota_ou),
+    equipos repetidos o muestras insuficientes (< 6 partidos).
     """
+    resultado_exacto = {
+        "marcador": markets["exact_score"],
+        "prob": markets["exact_score_prob"],
+        "cuota_justa": markets["exact_score_fair_odd"],
+        "top3": markets.get("top_exact_scores", []),
+    }
+
+    if mismo_equipo:
+        return {
+            "apostar": False,
+            "pick": "NO APOSTAR",
+            "motivo": "Se detectó el mismo equipo para local y visitante. Revisa los nombres o el país.",
+            "resultado_exacto": resultado_exacto,
+        }
+
+    if muestra_insuficiente:
+        return {
+            "apostar": False,
+            "pick": "NO APOSTAR",
+            "motivo": "Muestra insuficiente (se requieren al menos 6 partidos finalizados por equipo).",
+            "resultado_exacto": resultado_exacto,
+        }
+
     candidatos = [
         {
             "pick": "OVER 2.5 GOLES",
@@ -731,6 +757,7 @@ def seleccionar_pronostico_goal(
             "cuota_justa": markets["fair_over_25"],
             "edge": markets.get("edge_over_25"),
             "min_prob_req": min_prob_ou if cuota_o25 < 2.0 else max(0.47, min_prob_ou - 0.08),
+            "max_cuota_req": max_cuota_ou,
         },
         {
             "pick": "UNDER 2.5 GOLES",
@@ -740,6 +767,7 @@ def seleccionar_pronostico_goal(
             "cuota_justa": markets["fair_under_25"],
             "edge": markets.get("edge_under_25"),
             "min_prob_req": min_prob_ou if cuota_u25 < 2.0 else max(0.47, min_prob_ou - 0.08),
+            "max_cuota_req": max_cuota_ou,
         },
     ]
 
@@ -753,6 +781,7 @@ def seleccionar_pronostico_goal(
                 "cuota_justa": markets["fair_x"],
                 "edge": markets.get("edge_draw"),
                 "min_prob_req": 0.28,
+                "max_cuota_req": 99.0,
             }
         )
 
@@ -762,6 +791,7 @@ def seleccionar_pronostico_goal(
             c["edge"] is not None
             and c["edge"] >= min_edge
             and c["prob_raw"] >= c["min_prob_req"]
+            and c["cuota"] <= c["max_cuota_req"]
         )
         cumple_hist = (
             True
@@ -771,21 +801,14 @@ def seleccionar_pronostico_goal(
         if cumple_num and cumple_hist:
             validos.append(c)
 
-    resultado_exacto = {
-        "marcador": markets["exact_score"],
-        "prob": markets["exact_score_prob"],
-        "cuota_justa": markets["exact_score_fair_odd"],
-        "top3": markets.get("top_exact_scores", []),
-    }
-
     if not validos:
         return {
             "apostar": False,
             "pick": "NO APOSTAR",
             "motivo": (
                 f"Ningún mercado supera ventaja mínima (+{min_edge * 100:.1f}%), "
-                f"probabilidad mínima ({min_prob_ou * 100:.0f}% base / 47%+ en cuotas >= 2.00) "
-                f"y consistencia histórica."
+                f"probabilidad mínima ({min_prob_ou * 100:.0f}% base / 47%+ en cuotas 2.00–{max_cuota_ou:.2f}), "
+                f"tope de cuota ({max_cuota_ou:.2f}) y consistencia histórica."
             ),
             "resultado_exacto": resultado_exacto,
         }
@@ -820,6 +843,7 @@ def run_goal_matchup_poisson(
 
     home_id = home_team["id"]
     away_id = away_team["id"]
+    mismo_equipo = str(home_id) == str(away_id)
 
     home_stats = goal_summarize_team_goals(
         goal_fetch_team_results(home_id, goal_key, limit=50),
@@ -863,6 +887,10 @@ def run_goal_matchup_poisson(
     lam_away = min(max(0.20, raw_lam_away), cap)
 
     warnings: list[str] = []
+    if mismo_equipo:
+        warnings.append(
+            f"Local y visitante resueltos como el mismo equipo ({home_team.get('name')})."
+        )
     if home_stats["count"] < last_n:
         warnings.append(
             f"{home_team.get('name') or home_query} solo tiene {home_stats['count']} de {last_n} partidos solicitados."
@@ -875,6 +903,8 @@ def run_goal_matchup_poisson(
         warnings.append(
             f"Lambda acotada al máximo ({cap:.2f}) — sin tope era {raw_lam_home:.3f} / {raw_lam_away:.3f}."
         )
+
+    muestra_insuficiente = home_stats["count"] < 6 or away_stats["count"] < 6
 
     markets = calculate_poisson_markets(
         lam_home=lam_home,
@@ -892,6 +922,8 @@ def run_goal_matchup_poisson(
         "base_used": round(base, 2),
         "markets": markets,
         "warnings": warnings,
+        "mismo_equipo": mismo_equipo,
+        "muestra_insuficiente": muestra_insuficiente,
     }
 
 
@@ -1238,8 +1270,9 @@ def evaluar_entrada_25(
     min_prob_ou: float = 0.55,
     min_cuota_over: float = 1.45,
     min_cuota_under: float = 1.45,
+    max_cuota_ou: float = 2.60,
 ) -> dict:
-    """Evalúa +2.5 y -2.5 goles exigiendo ventaja mínima y probabilidad mínima."""
+    """Evalúa +2.5 y -2.5 goles exigiendo ventaja mínima, probabilidad mínima y tope de cuota."""
     probs = probs_over_under_25(xg_local, xg_visitante)
     p_over = probs["p_over_25"]
     p_under = probs["p_under_25"]
@@ -1255,7 +1288,7 @@ def evaluar_entrada_25(
         pasa_over = (
             edge_over >= min_edge
             and p_over >= req_over
-            and cuota_over_25 >= min_cuota_over
+            and min_cuota_over <= cuota_over_25 <= max_cuota_ou
         )
         desglose.append(
             {
@@ -1287,7 +1320,7 @@ def evaluar_entrada_25(
         pasa_under = (
             edge_under >= min_edge
             and p_under >= req_under
-            and cuota_under_25 >= min_cuota_under
+            and min_cuota_under <= cuota_under_25 <= max_cuota_ou
         )
         desglose.append(
             {
@@ -1316,7 +1349,8 @@ def evaluar_entrada_25(
             "decision": "NO APOSTAR",
             "motivo": (
                 f"Ningún mercado supera ventaja (+{min_edge * 100:.1f}%), "
-                f"probabilidad mínima ({min_prob_ou * 100:.0f}% base / 47%+ en cuotas >= 2.00) y cuota mínima."
+                f"probabilidad mínima ({min_prob_ou * 100:.0f}% base / 47%+ en cuotas 2.00–{max_cuota_ou:.2f}) "
+                f"y rango de cuota permitido (tope {max_cuota_ou:.2f})."
             ),
             "xg_total": probs["xg_total"],
             "p_over_25": round(p_over * 100, 1),
@@ -1492,7 +1526,7 @@ with tab_poisson:
         "Cuota Under 2.5 Winamax", min_value=1.01, max_value=10.0, value=1.39, step=0.05, key="goal_cuota_u25"
     )
 
-    gl1, gl2, gl3 = st.columns(3)
+    gl1, gl2, gl3, gl4 = st.columns(4)
     g_max_lambda = gl1.slider(
         "Límite máximo λ",
         min_value=1.50,
@@ -1516,6 +1550,14 @@ with tab_poisson:
         value=55.0,
         step=1.0,
         key="goal_min_prob_ou",
+    )
+    g_max_cuota_ou = gl4.slider(
+        "Cuota máx. +2.5/-2.5",
+        min_value=2.00,
+        max_value=4.00,
+        value=2.60,
+        step=0.05,
+        key="goal_max_cuota_ou",
     )
     gc_f1, gc_f2 = st.columns(2)
     g_solo_goles = gc_f1.checkbox(
@@ -1553,6 +1595,7 @@ with tab_poisson:
                 "cuota_u25": g_cuota_u25,
                 "min_edge": g_min_edge_pct / 100.0,
                 "min_prob_ou": g_min_prob_ou / 100.0,
+                "max_cuota_ou": g_max_cuota_ou,
                 "solo_goles": g_solo_goles,
                 "exigir_consistencia": g_exigir_cons,
                 "nota": g_nota,
@@ -1577,10 +1620,13 @@ with tab_poisson:
             cuota_u25=ultimo_g.get("cuota_u25", 1.39),
             min_edge=ultimo_g.get("min_edge", 0.04),
             min_prob_ou=ultimo_g.get("min_prob_ou", 0.55),
+            max_cuota_ou=ultimo_g.get("max_cuota_ou", 2.60),
             solo_goles=ultimo_g.get("solo_goles", True),
             home_stats=hs,
             away_stats=aws,
             exigir_consistencia=ultimo_g.get("exigir_consistencia", True),
+            mismo_equipo=res_g.get("mismo_equipo", False),
+            muestra_insuficiente=res_g.get("muestra_insuficiente", False),
         )
         ex = pron["resultado_exacto"]
         top3_txt = " | ".join(
@@ -1693,6 +1739,9 @@ with tab_detector:
         )
         min_cuota_under = st.slider(
             "Cuota mínima en -2.5 goles", min_value=1.30, max_value=3.00, value=1.45, step=0.05
+        )
+        max_cuota_det = st.slider(
+            "Cuota máxima en +2.5 / -2.5 goles", min_value=2.00, max_value=4.00, value=2.60, step=0.05
         )
 
     texto_ocr = ""
@@ -1895,6 +1944,7 @@ with tab_detector:
         min_prob_ou=min_prob_det_pct / 100.0,
         min_cuota_over=min_cuota_over,
         min_cuota_under=min_cuota_under,
+        max_cuota_ou=max_cuota_det,
     )
 
     partido_label = f"{equipo_local or 'Local'} vs {equipo_visitante or 'Visitante'}"
@@ -1926,4 +1976,4 @@ with tab_registro:
         )
         if col_d2.button("Limpiar tabla"):
             st.session_state["analisis_log"] = []
-            st.rerun
+            st.rerun()
