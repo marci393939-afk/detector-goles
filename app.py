@@ -22,6 +22,7 @@ st.set_page_config(
 API_BASE_URL = "https://v3.football.api-sports.io"
 GOAL_API_BASE_URL = "https://api.goal-api.com/v1"
 CACHE_PAISES_PATH = Path("equipos_paises.json")
+UMBRAL_RACHA_POR_DEFECTO = 60.0
 
 PAISES_BASE_INICIALES = {
     "muranga": "Kenia",
@@ -905,7 +906,7 @@ def seleccionar_pronostico_goal(
     exigir_consistencia: bool = True,
     mismo_equipo: bool = False,
     muestra_insuficiente: bool = False,
-    umbral_70: float = 70.0,
+    umbral_racha: float = UMBRAL_RACHA_POR_DEFECTO,
 ) -> dict:
     resultado_exacto = {
         "marcador": markets["exact_score"],
@@ -940,7 +941,7 @@ def seleccionar_pronostico_goal(
     h_over = float(home_stats.get("over25_rate", 0.0))
     a_over = float(away_stats.get("over25_rate", 0.0))
 
-    if h_under >= umbral_70 and a_under >= umbral_70:
+    if h_under >= umbral_racha and a_under >= umbral_racha:
         resultado_exacto["exacto_activo"] = True
         return {
             "apostar": True,
@@ -955,7 +956,7 @@ def seleccionar_pronostico_goal(
             "resultado_exacto": resultado_exacto,
         }
 
-    if h_over >= umbral_70 and a_over >= umbral_70:
+    if h_over >= umbral_racha and a_over >= umbral_racha:
         resultado_exacto["exacto_activo"] = False
         return {
             "apostar": True,
@@ -974,7 +975,7 @@ def seleccionar_pronostico_goal(
         "apostar": False,
         "pick": "NO APOSTAR",
         "motivo": (
-            f"No ambos equipos alcanzan el {umbral_70:.0f}% en la misma línea "
+            f"No ambos equipos alcanzan el {umbral_racha:.0f}% en la misma línea "
             f"(-2.5: {h_under:.1f}% vs {a_under:.1f}% | +2.5: {h_over:.1f}% vs {a_over:.1f}%)."
         ),
         "resultado_exacto": resultado_exacto,
@@ -1615,7 +1616,7 @@ def evaluar_entrada_25(
     under25_rate_vis: float | None = None,
     over25_rate_local: float | None = None,
     over25_rate_vis: float | None = None,
-    umbral_70: float = 70.0,
+    umbral_racha: float = UMBRAL_RACHA_POR_DEFECTO,
 ) -> dict:
     probs = probs_over_under_25(xg_local, xg_visitante)
     xg_total = probs["xg_total"]
@@ -1632,17 +1633,17 @@ def evaluar_entrada_25(
             "Línea": "-2.5 goles",
             "Local (10 PJ)": f"{u_l:.1f}%",
             "Visitante (10 PJ)": f"{u_v:.1f}%",
-            "Regla >= 70%": "OK" if (u_l >= umbral_70 and u_v >= umbral_70) else "No",
+            f"Regla >= {umbral_racha:.0f}%": "OK" if (u_l >= umbral_racha and u_v >= umbral_racha) else "No",
         },
         {
             "Línea": "+2.5 goles",
             "Local (10 PJ)": f"{o_l:.1f}%",
             "Visitante (10 PJ)": f"{o_v:.1f}%",
-            "Regla >= 70%": "OK" if (o_l >= umbral_70 and o_v >= umbral_70) else "No",
+            f"Regla >= {umbral_racha:.0f}%": "OK" if (o_l >= umbral_racha and o_v >= umbral_racha) else "No",
         },
     ]
 
-    if u_l >= umbral_70 and u_v >= umbral_70:
+    if u_l >= umbral_racha and u_v >= umbral_racha:
         return {
             "decision": "APOSTAR",
             "mercado": "-2.5 goles",
@@ -1654,7 +1655,7 @@ def evaluar_entrada_25(
             "desglose": desglose,
         }
 
-    if o_l >= umbral_70 and o_v >= umbral_70:
+    if o_l >= umbral_racha and o_v >= umbral_racha:
         return {
             "decision": "APOSTAR",
             "mercado": "+2.5 goles",
@@ -1669,7 +1670,7 @@ def evaluar_entrada_25(
     return {
         "decision": "NO APOSTAR",
         "motivo": (
-            f"No ambos equipos alcanzan el {umbral_70:.0f}% en la misma línea en sus últimos 10 partidos "
+            f"No ambos equipos alcanzan el {umbral_racha:.0f}% en la misma línea en sus últimos 10 partidos "
             f"(-2.5: {u_l:.1f}% vs {u_v:.1f}% | +2.5: {o_l:.1f}% vs {o_v:.1f}%)."
         ),
         "xg_total": xg_total,
@@ -1718,8 +1719,8 @@ for clave, valor_ini in {
     "gc_local_10": 1.10,
     "gf_vis_10": 1.20,
     "gc_vis_10": 1.20,
-    "under25_local_10": 70.0,
-    "under25_vis_10": 70.0,
+    "under25_local_10": 60.0,
+    "under25_vis_10": 60.0,
     "goles_h2h_prom": 2.40,
     "usar_h2h": False,
     "api_info_msg": "",
@@ -1729,13 +1730,16 @@ for clave, valor_ini in {
     "goal_home_input": "",
     "goal_away_input": "",
     "goal_country_input": "",
+    "goal_nota_input": "",
     "pais_ocr_detectado": "",
     "ultimo_ocr_partido_file": None,
     "ultimo_ocr_local_10_file": None,
     "ultimo_ocr_vis_10_file": None,
+    "ultimo_auto_fetch": None,
     "marcadores_local_10_txt": "",
     "marcadores_vis_10_txt": "",
     "lote_partidos_texto": "",
+    "uploader_reset_id": 0,
     "cache_paises_equipos": cargar_cache_paises(),
 }.items():
     if clave not in st.session_state:
@@ -1743,17 +1747,31 @@ for clave, valor_ini in {
 
 
 def _limpiar_partido_goal() -> None:
+    st.session_state["uploader_reset_id"] = int(st.session_state.get("uploader_reset_id", 0)) + 1
     st.session_state["goal_home_input"] = ""
     st.session_state["goal_away_input"] = ""
     st.session_state["goal_country_input"] = ""
-    st.session_state["pais_ocr_detectado"] = ""
     st.session_state["goal_nota_input"] = ""
+    st.session_state["pais_ocr_detectado"] = ""
     st.session_state["marcadores_local_10_txt"] = ""
     st.session_state["marcadores_vis_10_txt"] = ""
     st.session_state["ultimo_goal_analisis"] = None
     st.session_state["ultimo_ocr_partido_file"] = None
     st.session_state["ultimo_ocr_local_10_file"] = None
     st.session_state["ultimo_ocr_vis_10_file"] = None
+    st.session_state["ultimo_auto_fetch"] = None
+    st.session_state["equipo_local_input"] = ""
+    st.session_state["equipo_visitante_input"] = ""
+    st.session_state["api_info_msg"] = ""
+    st.session_state["api_warn_msg"] = ""
+    st.session_state["gf_local_10"] = 1.40
+    st.session_state["gc_local_10"] = 1.10
+    st.session_state["gf_vis_10"] = 1.20
+    st.session_state["gc_vis_10"] = 1.20
+    st.session_state["under25_local_10"] = 60.0
+    st.session_state["under25_vis_10"] = 60.0
+    st.session_state["goles_h2h_prom"] = 2.40
+    st.session_state["usar_h2h"] = False
 
 
 def _calcular_desde_capturas_3(
@@ -1832,8 +1850,10 @@ def _calcular_desde_capturas_3(
     }
 
 
+reset_id = int(st.session_state.get("uploader_reset_id", 0))
+
 st.title("⚽ Detector de Goles (+2.5 / -2.5)")
-st.caption("3 capturas manuales (partido + 10 últimos del local + 10 últimos del visitante) y regla del 70%.")
+st.caption("3 capturas manuales (partido + 10 últimos del local + 10 últimos del visitante) y regla del 60%.")
 
 tab_poisson, tab_lote, tab_detector, tab_registro = st.tabs(
     ["Análisis Poisson", "Evaluador rápido", "Detector (+2.5 / -2.5)", "Registro de análisis"]
@@ -1864,7 +1884,7 @@ with tab_poisson:
     archivo_partido = st.file_uploader(
         "1. Captura del partido a analizar",
         type=["png", "jpg", "jpeg", "webp"],
-        key="ocr_partido_uploader",
+        key=f"ocr_partido_uploader_{reset_id}",
     )
     if archivo_partido is not None:
         img_p_bytes = archivo_partido.getvalue()
@@ -1905,7 +1925,11 @@ with tab_poisson:
     if g_home_input.strip() or g_away_input.strip():
         etq_l = f"**{g_home_input or 'Local'}** (`{pais_l_preview or 'Sin país'}`)"
         etq_v = f"**{g_away_input or 'Visitante'}** (`{pais_v_preview or 'Sin país'}`)"
-        if pais_l_preview and pais_v_preview and normalizar_texto(pais_l_preview) == normalizar_texto(pais_v_preview):
+        if (
+            pais_l_preview
+            and pais_v_preview
+            and normalizar_texto(pais_l_preview) == normalizar_texto(pais_v_preview)
+        ):
             st.caption(f"🌍 Verificación previa: {etq_l} vs {etq_v} · ✅ Ambos de **{pais_l_preview}**")
         else:
             st.caption(f"🌍 Verificación previa: {etq_l} vs {etq_v}")
@@ -1914,7 +1938,7 @@ with tab_poisson:
     archivo_local_10 = st.file_uploader(
         "2. Últimos 10 partidos — Local",
         type=["png", "jpg", "jpeg", "webp"],
-        key="ocr_local_10_uploader",
+        key=f"ocr_local_10_uploader_{reset_id}",
     )
     if archivo_local_10 is not None:
         img_l_bytes = archivo_local_10.getvalue()
@@ -1950,7 +1974,7 @@ with tab_poisson:
     archivo_vis_10 = st.file_uploader(
         "3. Últimos 10 partidos — Visitante",
         type=["png", "jpg", "jpeg", "webp"],
-        key="ocr_vis_10_uploader",
+        key=f"ocr_vis_10_uploader_{reset_id}",
     )
     if archivo_vis_10 is not None:
         img_v_bytes = archivo_vis_10.getvalue()
@@ -2061,7 +2085,7 @@ with tab_poisson:
             exigir_consistencia=True,
             mismo_equipo=res_g.get("mismo_equipo", False),
             muestra_insuficiente=res_g.get("muestra_insuficiente", False),
-            umbral_70=70.0,
+            umbral_racha=UMBRAL_RACHA_POR_DEFECTO,
         )
         ex = pron["resultado_exacto"]
         top3_txt = " | ".join(
@@ -2079,7 +2103,11 @@ with tab_poisson:
         etq_pais_l = pais_loc_res if pais_loc_res else "País sin confirmar"
         etq_pais_v = pais_vis_res if pais_vis_res else "País sin confirmar"
 
-        if pais_loc_res and pais_vis_res and normalizar_texto(pais_loc_res) == normalizar_texto(pais_vis_res):
+        if (
+            pais_loc_res
+            and pais_vis_res
+            and normalizar_texto(pais_loc_res) == normalizar_texto(pais_vis_res)
+        ):
             estado_pais_txt = f"✅ Ambos equipos son de **{pais_loc_res}**"
         elif pais_loc_res and pais_vis_res:
             estado_pais_txt = f"⚠️ Países distintos (`{pais_loc_res}` vs `{pais_vis_res}`)"
@@ -2093,7 +2121,11 @@ with tab_poisson:
             f"Media goles/equipo aplicada: `{res_g.get('base_used', 1.30)}`"
         )
 
-        if not pais_loc_res or not pais_vis_res or normalizar_texto(pais_loc_res) != normalizar_texto(pais_vis_res):
+        if (
+            not pais_loc_res
+            or not pais_vis_res
+            or normalizar_texto(pais_loc_res) != normalizar_texto(pais_vis_res)
+        ):
             with st.expander("Guardar / corregir país de estos equipos en memoria local"):
                 cp1, cp2, cp3 = st.columns([2, 2, 1.2])
                 nuevo_p_l = cp1.text_input(
@@ -2143,14 +2175,14 @@ with tab_poisson:
             exacto_recomendado_txt = ex["under_marcador"]
             st.success(
                 f"### ✅ PRONÓSTICO → {pron['pick']} | EXACTO (-2.5) → `{ex['under_marcador']}`\n"
-                f"**Racha 70%:** Local `{pron['racha_home']:.1f}%` · Visitante `{pron['racha_vis']:.1f}%` | "
+                f"**Racha {UMBRAL_RACHA_POR_DEFECTO:.0f}%:** Local `{pron['racha_home']:.1f}%` · Visitante `{pron['racha_vis']:.1f}%` | "
                 f"**Prob. modelo -2.5:** `{pron['prob']:.1f}%` (cuota justa `{pron['cuota_justa']}`)\n\n"
                 f"**Marcadores exactos (-2.5) más probables:** {under_top3_txt}"
             )
         elif pron["apostar"] and pron["pick"] == "OVER 2.5 GOLES":
             st.success(
                 f"### ✅ PRONÓSTICO → {pron['pick']} (sin exacto; solo en -2.5 goles)\n"
-                f"**Racha 70%:** Local `{pron['racha_home']:.1f}%` · Visitante `{pron['racha_vis']:.1f}%` | "
+                f"**Racha {UMBRAL_RACHA_POR_DEFECTO:.0f}%:** Local `{pron['racha_home']:.1f}%` · Visitante `{pron['racha_vis']:.1f}%` | "
                 f"**Prob. modelo +2.5:** `{pron['prob']:.1f}%` (cuota justa `{pron['cuota_justa']}`)\n\n"
                 f"*Referencia general marcadores:* {top3_txt}"
             )
@@ -2194,7 +2226,7 @@ with tab_poisson:
 with tab_lote:
     st.subheader("Evaluador rápido de varios partidos")
     st.caption(
-        "Pega un partido por línea (`Local vs Visitante`). Evalúa la regla del 70% sin mirar cuotas y muestra exacto solo en `-2.5 goles`."
+        "Pega un partido por línea (`Local vs Visitante`). Evalúa la regla del 60% sin mirar cuotas y muestra exacto solo en `-2.5 goles`."
     )
     goal_key_manual = st.text_input(
         "GOAL_KEY (opcional si ya está en Secrets o entorno)",
@@ -2238,7 +2270,7 @@ with tab_lote:
                         exigir_consistencia=True,
                         mismo_equipo=r_p.get("mismo_equipo", False),
                         muestra_insuficiente=r_p.get("muestra_insuficiente", False),
-                        umbral_70=70.0,
+                        umbral_racha=UMBRAL_RACHA_POR_DEFECTO,
                     )
                     ex_p = sel_p["resultado_exacto"]
                     exacto_col = (
@@ -2274,7 +2306,7 @@ with tab_detector:
     archivo = st.file_uploader(
         "Sube una captura del partido para sugerir los equipos",
         type=["png", "jpg", "jpeg", "webp"],
-        key="detector_ocr_uploader",
+        key=f"detector_ocr_uploader_{reset_id}",
     )
 
     with st.expander("Ajustes de API-Football y OCR"):
@@ -2491,7 +2523,7 @@ with tab_detector:
         under25_rate_vis=under25_vis_10,
         over25_rate_local=round(100.0 - float(under25_local_10), 1),
         over25_rate_vis=round(100.0 - float(under25_vis_10), 1),
-        umbral_70=70.0,
+        umbral_racha=UMBRAL_RACHA_POR_DEFECTO,
     )
 
     partido_label = f"{equipo_local or 'Local'} vs {equipo_visitante or 'Visitante'}"
