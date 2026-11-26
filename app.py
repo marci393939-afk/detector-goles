@@ -1,8 +1,10 @@
+import json
 import math
 import os
 import re
 import unicodedata
 from io import BytesIO
+from pathlib import Path
 
 import pandas as pd
 from PIL import Image, ImageEnhance, ImageOps
@@ -19,6 +21,100 @@ st.set_page_config(
 
 API_BASE_URL = "https://v3.football.api-sports.io"
 GOAL_API_BASE_URL = "https://api.goal-api.com/v1"
+CACHE_PAISES_PATH = Path("equipos_paises.json")
+
+PAISES_BASE_INICIALES = {
+    "muranga": "Kenia",
+    "murang'a": "Kenia",
+    "muranga seal": "Kenia",
+    "murang'a seal": "Kenia",
+    "kcb": "Kenia",
+    "gor mahia": "Kenia",
+    "tusker": "Kenia",
+    "afc leopards": "Kenia",
+    "bandari": "Kenia",
+    "kakamega homeboyz": "Kenia",
+    "kenya police": "Kenia",
+    "kariobangi sharks": "Kenia",
+    "sofapaka": "Kenia",
+    "ulinzi stars": "Kenia",
+    "bidco united": "Kenia",
+    "nairobi city stars": "Kenia",
+    "post rangers": "Kenia",
+    "shabana": "Kenia",
+    "mathare united": "Kenia",
+    "mara sugar": "Kenia",
+    "kolkheti 1913": "Georgia",
+    "bolnisi": "Georgia",
+    "sioni bolnisi": "Georgia",
+    "telavi": "Georgia",
+    "samtredia": "Georgia",
+    "merani martvili": "Georgia",
+    "gareji": "Georgia",
+    "fc gareji sagarejo": "Georgia",
+    "dusheti": "Georgia",
+    "odishi 1919": "Georgia",
+    "shturmi": "Georgia",
+    "gori": "Georgia",
+    "walter ferretti": "Nicaragua",
+    "sport sebaco": "Nicaragua",
+}
+
+PAISES_OCR_MAPA = {
+    "KENIA": "Kenia",
+    "KENYA": "Kenia",
+    "GEORGIA": "Georgia",
+    "NICARAGUA": "Nicaragua",
+    "ESPANA": "España",
+    "ESPAÑA": "España",
+    "SPAIN": "España",
+    "INGLATERRA": "Inglaterra",
+    "ENGLAND": "Inglaterra",
+    "FRANCIA": "Francia",
+    "FRANCE": "Francia",
+    "ALEMANIA": "Alemania",
+    "GERMANY": "Alemania",
+    "ITALIA": "Italia",
+    "ITALY": "Italia",
+    "PORTUGAL": "Portugal",
+    "ARMENIA": "Armenia",
+    "UCRANIA": "Ucrania",
+    "UKRAINE": "Ucrania",
+    "BRASIL": "Brasil",
+    "BRAZIL": "Brasil",
+    "ARGENTINA": "Argentina",
+    "COLOMBIA": "Colombia",
+    "MEXICO": "México",
+    "MÉXICO": "México",
+    "CHILE": "Chile",
+    "PERU": "Perú",
+    "PERÚ": "Perú",
+    "TURQUIA": "Turquía",
+    "TURQUÍA": "Turquía",
+    "GRECIA": "Grecia",
+    "POLONIA": "Polonia",
+    "RUMANIA": "Rumanía",
+    "BULGARIA": "Bulgaria",
+    "SERBIA": "Serbia",
+    "CROACIA": "Croacia",
+    "NORUEGA": "Noruega",
+    "SUECIA": "Suecia",
+    "DINAMARCA": "Dinamarca",
+    "FINLANDIA": "Finlandia",
+    "JAPON": "Japón",
+    "JAPÓN": "Japón",
+    "COREA DEL SUR": "Corea del Sur",
+    "MARRUECOS": "Marruecos",
+    "EGIPTO": "Egipto",
+    "SUDAFRICA": "Sudáfrica",
+    "SUDÁFRICA": "Sudáfrica",
+    "NIGERIA": "Nigeria",
+    "GHANA": "Ghana",
+    "TANZANIA": "Tanzania",
+    "UGANDA": "Uganda",
+    "ETIOPIA": "Etiopía",
+    "ETIOPÍA": "Etiopía",
+}
 
 QUICK_PRESETS_GOAL = {
     "Personalizado": ("", "", ""),
@@ -186,6 +282,77 @@ def normalizar_texto(texto: str) -> str:
         c for c in unicodedata.normalize("NFD", texto) if unicodedata.category(c) != "Mn"
     )
     return re.sub(r"\s+", " ", sin_tildes).strip().lower()
+
+
+def _clave_equipo_cache(nombre: str) -> str:
+    norm = normalizar_texto(nombre)
+    norm = re.sub(r"['’`]", "", norm)
+    norm = re.sub(r"^(?:fc|cf|cd|ud|rcd|ca|ac|as|sc|ss|us|fk|sk|afc)\s+", "", norm)
+    norm = re.sub(r"\s+(?:fc|cf|sad|sc|fk|sk|afc)$", "", norm)
+    return norm.strip()
+
+
+def cargar_cache_paises() -> dict[str, str]:
+    mapa = {_clave_equipo_cache(k): v for k, v in PAISES_BASE_INICIALES.items()}
+    if CACHE_PAISES_PATH.exists():
+        try:
+            datos = json.loads(CACHE_PAISES_PATH.read_text(encoding="utf-8"))
+            if isinstance(datos, dict):
+                for k, v in datos.items():
+                    clave = _clave_equipo_cache(str(k))
+                    if clave and str(v).strip():
+                        mapa[clave] = str(v).strip()
+        except Exception:
+            pass
+    return mapa
+
+
+def guardar_equipo_pais(nombre_equipo: str, pais: str) -> None:
+    clave = _clave_equipo_cache(nombre_equipo)
+    pais_limpio = (pais or "").strip()
+    if not clave or not pais_limpio:
+        return
+    datos_actuales: dict[str, str] = {}
+    if CACHE_PAISES_PATH.exists():
+        try:
+            leido = json.loads(CACHE_PAISES_PATH.read_text(encoding="utf-8"))
+            if isinstance(leido, dict):
+                datos_actuales = leido
+        except Exception:
+            datos_actuales = {}
+    datos_actuales[clave] = pais_limpio
+    try:
+        CACHE_PAISES_PATH.write_text(
+            json.dumps(datos_actuales, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+    st.session_state["cache_paises_equipos"] = cargar_cache_paises()
+
+
+def consultar_pais_equipo(nombre_equipo: str) -> str:
+    clave = _clave_equipo_cache(nombre_equipo)
+    if not clave:
+        return ""
+    mapa = st.session_state.get("cache_paises_equipos") or cargar_cache_paises()
+    if clave in mapa:
+        return mapa[clave]
+    for k_guardada, v_pais in mapa.items():
+        if len(clave) >= 4 and (clave in k_guardada or k_guardada in clave):
+            return v_pais
+    return ""
+
+
+def detectar_pais_en_ocr(texto_ocr: str) -> str:
+    if not texto_ocr:
+        return ""
+    texto_norm = normalizar_texto(texto_ocr).upper()
+    for clave_pais, nombre_bonito in PAISES_OCR_MAPA.items():
+        clave_norm = normalizar_texto(clave_pais).upper()
+        if re.search(rf"\b{re.escape(clave_norm)}\b", texto_norm):
+            return nombre_bonito
+    return ""
 
 
 def preparar_nombre_busqueda(nombre: str) -> str:
@@ -968,7 +1135,6 @@ def ejecutar_ocr_digitos_columna(img_bytes: bytes, psm: int = 6) -> str:
     imagen = Image.open(BytesIO(img_bytes)).convert("RGB")
     w, h = imagen.size
 
-    # Franja derecha donde suelen ir los goles apilados antes del badge G/P/E
     x_ini = int(w * 0.62)
     x_fin = int(w * 0.92)
     y_ini = int(h * 0.08)
@@ -1168,7 +1334,7 @@ def _es_token_basura_ocr(token: str) -> bool:
 
 def _es_candidato_equipo_valido(candidato: str) -> bool:
     limpio = re.sub(r"\s+", " ", candidato).strip()
-    if len(limpio) < 4 or len(limpio) > 30:
+    if len(limpio) < 3 or len(limpio) > 30:
         return False
     if re.search(r"[:;{}\[\]~\\]", limpio):
         return False
@@ -1178,10 +1344,10 @@ def _es_candidato_equipo_valido(candidato: str) -> bool:
     palabras = limpio.split()
     if len(palabras) > 3:
         return False
-    if len(palabras) == 1 and len(re.sub(r"[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ]", "", palabras[0])) < 4:
+    if len(palabras) == 1 and len(re.sub(r"[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ]", "", palabras[0])) < 3:
         return False
     letras = sum(c.isalpha() for c in limpio)
-    if letras < 4:
+    if letras < 3:
         return False
     minus = [normalizar_texto(p) for p in palabras]
     if set(minus).issubset(
@@ -1217,7 +1383,7 @@ def limpiar_lineas_ocr(texto_ocr: str) -> list[str]:
             continue
 
         tokens = limpia.split()
-        if tokens and all(tok.isupper() and len(tok) <= 4 for tok in tokens):
+        if tokens and all(tok.isupper() and len(tok) <= 4 for tok in tokens) and len(tokens) > 1:
             continue
 
         if tokens and all(_es_token_basura_ocr(tok) for tok in tokens):
@@ -1540,12 +1706,14 @@ for clave, valor_ini in {
     "goal_home_input": "",
     "goal_away_input": "",
     "goal_country_input": "",
+    "pais_ocr_detectado": "",
     "ultimo_ocr_partido_file": None,
     "ultimo_ocr_local_10_file": None,
     "ultimo_ocr_vis_10_file": None,
     "marcadores_local_10_txt": "",
     "marcadores_vis_10_txt": "",
     "lote_partidos_texto": "",
+    "cache_paises_equipos": cargar_cache_paises(),
 }.items():
     if clave not in st.session_state:
         st.session_state[clave] = valor_ini
@@ -1555,6 +1723,7 @@ def _limpiar_partido_goal() -> None:
     st.session_state["goal_home_input"] = ""
     st.session_state["goal_away_input"] = ""
     st.session_state["goal_country_input"] = ""
+    st.session_state["pais_ocr_detectado"] = ""
     st.session_state["goal_nota_input"] = ""
     st.session_state["marcadores_local_10_txt"] = ""
     st.session_state["marcadores_vis_10_txt"] = ""
@@ -1572,10 +1741,22 @@ def _calcular_desde_capturas_3(
     league_avg_per_side: float,
     auto_league_avg: bool,
     max_lambda: float,
+    pais_ocr_hint: str = "",
 ) -> dict:
     loc_limpio = (home_nombre or "Local").strip() or "Local"
     vis_limpio = (away_nombre or "Visitante").strip() or "Visitante"
     mismo_equipo = normalizar_texto(loc_limpio) == normalizar_texto(vis_limpio)
+
+    pais_loc = consultar_pais_equipo(loc_limpio)
+    pais_vis = consultar_pais_equipo(vis_limpio)
+
+    if pais_ocr_hint:
+        if not pais_loc:
+            pais_loc = pais_ocr_hint
+            guardar_equipo_pais(loc_limpio, pais_ocr_hint)
+        if not pais_vis:
+            pais_vis = pais_ocr_hint
+            guardar_equipo_pais(vis_limpio, pais_ocr_hint)
 
     hs = construir_stats_desde_marcadores(marcadores_l, loc_limpio, es_local_en_proximo=True)
     aws = construir_stats_desde_marcadores(marcadores_v, vis_limpio, es_local_en_proximo=False)
@@ -1616,8 +1797,8 @@ def _calcular_desde_capturas_3(
     markets = calculate_poisson_markets(lam_home=lam_home, lam_away=lam_away)
 
     return {
-        "home_team": {"name": loc_limpio, "country": "Captura manual"},
-        "away_team": {"name": vis_limpio, "country": "Captura manual"},
+        "home_team": {"name": loc_limpio, "country": pais_loc},
+        "away_team": {"name": vis_limpio, "country": pais_vis},
         "home_stats": hs,
         "away_stats": aws,
         "base_used": round(base, 2),
@@ -1673,12 +1854,19 @@ with tab_poisson:
         try:
             txt_p = ejecutar_ocr_bytes(img_p_bytes, psm=psm_goal)
             loc_ocr, vis_ocr = sugerir_equipos_candidatos(txt_p)
+            pais_p = detectar_pais_en_ocr(txt_p)
             marca_p = f"{archivo_partido.file_id}_{psm_goal}"
             if st.session_state.get("ultimo_ocr_partido_file") != marca_p:
                 if loc_ocr:
                     st.session_state["goal_home_input"] = loc_ocr
                 if vis_ocr:
                     st.session_state["goal_away_input"] = vis_ocr
+                if pais_p:
+                    st.session_state["pais_ocr_detectado"] = pais_p
+                    if loc_ocr:
+                        guardar_equipo_pais(loc_ocr, pais_p)
+                    if vis_ocr:
+                        guardar_equipo_pais(vis_ocr, pais_p)
                 st.session_state["ultimo_ocr_partido_file"] = marca_p
             with st.expander("Ver texto OCR — Captura 1 (Partido)"):
                 st.text(txt_p if txt_p.strip() else "No se detectó texto.")
@@ -1688,6 +1876,16 @@ with tab_poisson:
     gc1, gc2 = st.columns(2)
     g_home_input = gc1.text_input("Equipo Local", key="goal_home_input")
     g_away_input = gc2.text_input("Equipo Visitante", key="goal_away_input")
+
+    pais_l_preview = consultar_pais_equipo(g_home_input)
+    pais_v_preview = consultar_pais_equipo(g_away_input)
+    if g_home_input.strip() or g_away_input.strip():
+        etq_l = f"**{g_home_input or 'Local'}** (`{pais_l_preview or 'Sin país'}`)"
+        etq_v = f"**{g_away_input or 'Visitante'}** (`{pais_v_preview or 'Sin país'}`)"
+        if pais_l_preview and pais_v_preview and normalizar_texto(pais_l_preview) == normalizar_texto(pais_v_preview):
+            st.caption(f"🌍 Verificación previa: {etq_l} vs {etq_v} · ✅ Ambos de **{pais_l_preview}**")
+        else:
+            st.caption(f"🌍 Verificación previa: {etq_l} vs {etq_v}")
 
     st.markdown("**Paso 2 · Captura de los últimos 10 partidos del Equipo Local**")
     archivo_local_10 = st.file_uploader(
@@ -1705,6 +1903,9 @@ with tab_poisson:
         )
         try:
             txt_l, pares_l = extraer_marcadores_desde_imagen(img_l_bytes, psm_preferido=psm_goal)
+            pais_l_ocr = detectar_pais_en_ocr(txt_l)
+            if pais_l_ocr and g_home_input.strip():
+                guardar_equipo_pais(g_home_input, pais_l_ocr)
             marca_l = f"{archivo_local_10.file_id}_{psm_goal}"
             if st.session_state.get("ultimo_ocr_local_10_file") != marca_l:
                 st.session_state["marcadores_local_10_txt"] = ", ".join(
@@ -1738,6 +1939,9 @@ with tab_poisson:
         )
         try:
             txt_v, pares_v = extraer_marcadores_desde_imagen(img_v_bytes, psm_preferido=psm_goal)
+            pais_v_ocr = detectar_pais_en_ocr(txt_v)
+            if pais_v_ocr and g_away_input.strip():
+                guardar_equipo_pais(g_away_input, pais_v_ocr)
             marca_v = f"{archivo_vis_10.file_id}_{psm_goal}"
             if st.session_state.get("ultimo_ocr_vis_10_file") != marca_v:
                 st.session_state["marcadores_vis_10_txt"] = ", ".join(
@@ -1807,6 +2011,7 @@ with tab_poisson:
                     league_avg_per_side=g_league_avg,
                     auto_league_avg=g_auto_league,
                     max_lambda=g_max_lambda,
+                    pais_ocr_hint=st.session_state.get("pais_ocr_detectado", ""),
                 )
                 st.session_state["ultimo_goal_analisis"] = {
                     "res": res_g,
@@ -1846,11 +2051,46 @@ with tab_poisson:
         for aviso in res_g.get("warnings", []):
             st.warning(f"⚠️ {aviso}")
 
+        pais_loc_res = (ht.get("country") or "").strip()
+        pais_vis_res = (at.get("country") or "").strip()
+        etq_pais_l = pais_loc_res if pais_loc_res else "País sin confirmar"
+        etq_pais_v = pais_vis_res if pais_vis_res else "País sin confirmar"
+
+        if pais_loc_res and pais_vis_res and normalizar_texto(pais_loc_res) == normalizar_texto(pais_vis_res):
+            estado_pais_txt = f"✅ Ambos equipos son de **{pais_loc_res}**"
+        elif pais_loc_res and pais_vis_res:
+            estado_pais_txt = f"⚠️ Países distintos (`{pais_loc_res}` vs `{pais_vis_res}`)"
+        else:
+            estado_pais_txt = "⚠️ País pendiente de confirmar en caché local"
+
         st.caption(
-            f"Partido: **{ht.get('name')}** vs **{at.get('name')}** · "
+            f"Partido: **{ht.get('name')}** ({etq_pais_l}) vs **{at.get('name')}** ({etq_pais_v}) · "
+            f"{estado_pais_txt} · "
             f"Partidos analizados: `{hs['count']}` (Local) / `{aws['count']}` (Visitante) · "
             f"Media goles/equipo aplicada: `{res_g.get('base_used', 1.30)}`"
         )
+
+        if not pais_loc_res or not pais_vis_res or normalizar_texto(pais_loc_res) != normalizar_texto(pais_vis_res):
+            with st.expander("Guardar / corregir país de estos equipos en memoria local"):
+                cp1, cp2, cp3 = st.columns([2, 2, 1.2])
+                nuevo_p_l = cp1.text_input(
+                    f"País {ht.get('name')}",
+                    value=pais_loc_res,
+                    key="edit_pais_loc_cache",
+                )
+                nuevo_p_v = cp2.text_input(
+                    f"País {at.get('name')}",
+                    value=pais_vis_res or nuevo_p_l,
+                    key="edit_pais_vis_cache",
+                )
+                if cp3.button("Guardar país", key="btn_save_pais_cache", width="stretch"):
+                    if nuevo_p_l.strip():
+                        guardar_equipo_pais(ht.get("name", ""), nuevo_p_l.strip())
+                        res_g["home_team"]["country"] = nuevo_p_l.strip()
+                    if nuevo_p_v.strip():
+                        guardar_equipo_pais(at.get("name", ""), nuevo_p_v.strip())
+                        res_g["away_team"]["country"] = nuevo_p_v.strip()
+                    st.rerun()
 
         st.info(
             f"**Trayectoria en últimos partidos:** "
