@@ -23,6 +23,7 @@ API_BASE_URL = "https://v3.football.api-sports.io"
 GOAL_API_BASE_URL = "https://api.goal-api.com/v1"
 CACHE_PAISES_PATH = Path("equipos_paises.json")
 UMBRAL_RACHA_POR_DEFECTO = 60.0
+UMBRAL_POISSON_POR_DEFECTO = 58.0
 
 PAISES_BASE_INICIALES = {
     "muranga": "Kenia",
@@ -565,7 +566,6 @@ def obtener_h2h_api(team_local_id: int, team_vis_id: int, api_key: str) -> dict 
     }
 
 
-# --- FUNCIONES GOAL API + POISSON ---
 @st.cache_data(ttl=86400, show_spinner=False)
 def goal_search_teams_cached(query: str, country: str | None, goal_key: str) -> list[dict]:
     clean_query = query.strip()
@@ -915,6 +915,7 @@ def seleccionar_pronostico_goal(
     mismo_equipo: bool = False,
     muestra_insuficiente: bool = False,
     umbral_racha: float = UMBRAL_RACHA_POR_DEFECTO,
+    umbral_poisson: float = UMBRAL_POISSON_POR_DEFECTO,
 ) -> dict:
     resultado_exacto = {
         "marcador": markets.get("exact_score", "1 - 0"),
@@ -933,58 +934,98 @@ def seleccionar_pronostico_goal(
     h_over = float((home_stats or {}).get("over25_rate", 0.0))
     a_over = float((away_stats or {}).get("over25_rate", 0.0))
 
+    prob_u25_pct = round(float(markets.get("prob_under_25", 0.0)) * 100, 1)
+    prob_o25_pct = round(float(markets.get("prob_over_25", 0.0)) * 100, 1)
+
     if mismo_equipo:
         return {
             "apostar": False,
+            "senal_parcial": False,
             "pick": "NO APOSTAR",
             "motivo": "Se detectó el mismo equipo para local y visitante. Revisa los nombres o el país.",
             "racha_home": h_under,
             "racha_away": a_under,
+            "prob_poisson": prob_u25_pct,
             "resultado_exacto": resultado_exacto,
         }
 
     if muestra_insuficiente or not home_stats or not away_stats:
         return {
             "apostar": False,
+            "senal_parcial": False,
             "pick": "NO APOSTAR",
             "motivo": "Muestra insuficiente (se requieren al menos 6 partidos por equipo).",
             "racha_home": h_under,
             "racha_away": a_under,
+            "prob_poisson": prob_u25_pct,
             "resultado_exacto": resultado_exacto,
         }
 
     if h_under >= umbral_racha and a_under >= umbral_racha:
-        resultado_exacto["exacto_activo"] = True
+        if prob_u25_pct >= umbral_poisson:
+            resultado_exacto["exacto_activo"] = True
+            return {
+                "apostar": True,
+                "senal_parcial": False,
+                "pick": "UNDER 2.5 GOLES",
+                "cuota": cuota_u25,
+                "prob": prob_u25_pct,
+                "prob_raw": markets.get("prob_under_25", 0.0),
+                "cuota_justa": markets.get("fair_under_25"),
+                "edge": markets.get("edge_under_25") or 0.0,
+                "racha_home": h_under,
+                "racha_away": a_under,
+                "prob_poisson": prob_u25_pct,
+                "resultado_exacto": resultado_exacto,
+            }
         return {
-            "apostar": True,
-            "pick": "UNDER 2.5 GOLES",
-            "cuota": cuota_u25,
-            "prob": round(float(markets.get("prob_under_25", 0.0)) * 100, 1),
-            "prob_raw": markets.get("prob_under_25", 0.0),
-            "cuota_justa": markets.get("fair_under_25"),
-            "edge": markets.get("edge_under_25") or 0.0,
+            "apostar": False,
+            "senal_parcial": True,
+            "pick": "NO APOSTAR",
+            "motivo": (
+                f"Cumple racha -2.5 ({h_under:.1f}% vs {a_under:.1f}%), pero Poisson marca {prob_u25_pct:.1f}% "
+                f"(mínimo requerido: {umbral_poisson:.0f}%)."
+            ),
             "racha_home": h_under,
             "racha_away": a_under,
+            "prob_poisson": prob_u25_pct,
             "resultado_exacto": resultado_exacto,
         }
 
     if h_over >= umbral_racha and a_over >= umbral_racha:
-        resultado_exacto["exacto_activo"] = False
+        if prob_o25_pct >= umbral_poisson:
+            resultado_exacto["exacto_activo"] = False
+            return {
+                "apostar": True,
+                "senal_parcial": False,
+                "pick": "OVER 2.5 GOLES",
+                "cuota": cuota_o25,
+                "prob": prob_o25_pct,
+                "prob_raw": markets.get("prob_over_25", 0.0),
+                "cuota_justa": markets.get("fair_over_25"),
+                "edge": markets.get("edge_over_25") or 0.0,
+                "racha_home": h_over,
+                "racha_away": a_over,
+                "prob_poisson": prob_o25_pct,
+                "resultado_exacto": resultado_exacto,
+            }
         return {
-            "apostar": True,
-            "pick": "OVER 2.5 GOLES",
-            "cuota": cuota_o25,
-            "prob": round(float(markets.get("prob_over_25", 0.0)) * 100, 1),
-            "prob_raw": markets.get("prob_over_25", 0.0),
-            "cuota_justa": markets.get("fair_over_25"),
-            "edge": markets.get("edge_over_25") or 0.0,
+            "apostar": False,
+            "senal_parcial": True,
+            "pick": "NO APOSTAR",
+            "motivo": (
+                f"Cumple racha +2.5 ({h_over:.1f}% vs {a_over:.1f}%), pero Poisson marca {prob_o25_pct:.1f}% "
+                f"(mínimo requerido: {umbral_poisson:.0f}%)."
+            ),
             "racha_home": h_over,
             "racha_away": a_over,
+            "prob_poisson": prob_o25_pct,
             "resultado_exacto": resultado_exacto,
         }
 
     return {
         "apostar": False,
+        "senal_parcial": False,
         "pick": "NO APOSTAR",
         "motivo": (
             f"No ambos equipos alcanzan el {umbral_racha:.0f}% en la misma línea "
@@ -992,6 +1033,7 @@ def seleccionar_pronostico_goal(
         ),
         "racha_home": h_under,
         "racha_away": a_under,
+        "prob_poisson": max(prob_u25_pct, prob_o25_pct),
         "resultado_exacto": resultado_exacto,
     }
 
@@ -1635,11 +1677,14 @@ def evaluar_entrada_25(
     over25_rate_local: float | None = None,
     over25_rate_vis: float | None = None,
     umbral_racha: float = UMBRAL_RACHA_POR_DEFECTO,
+    umbral_poisson: float = UMBRAL_POISSON_POR_DEFECTO,
 ) -> dict:
     probs = probs_over_under_25(xg_local, xg_visitante)
     xg_total = probs["xg_total"]
     p_over = probs["p_over_25"]
     p_under = probs["p_under_25"]
+    p_over_pct = round(p_over * 100, 1)
+    p_under_pct = round(p_under * 100, 1)
 
     u_l = float(under25_rate_local or 0.0)
     u_v = float(under25_rate_vis or 0.0)
@@ -1651,49 +1696,74 @@ def evaluar_entrada_25(
             "Línea": "-2.5 goles",
             "Local (10 PJ)": f"{u_l:.1f}%",
             "Visitante (10 PJ)": f"{u_v:.1f}%",
-            f"Regla >= {umbral_racha:.0f}%": "OK" if (u_l >= umbral_racha and u_v >= umbral_racha) else "No",
+            "Poisson": f"{p_under_pct:.1f}%",
+            f"Racha>={umbral_racha:.0f}% + Pois>={umbral_poisson:.0f}%": (
+                "OK"
+                if (u_l >= umbral_racha and u_v >= umbral_racha and p_under_pct >= umbral_poisson)
+                else "No"
+            ),
         },
         {
             "Línea": "+2.5 goles",
             "Local (10 PJ)": f"{o_l:.1f}%",
             "Visitante (10 PJ)": f"{o_v:.1f}%",
-            f"Regla >= {umbral_racha:.0f}%": "OK" if (o_l >= umbral_racha and o_v >= umbral_racha) else "No",
+            "Poisson": f"{p_over_pct:.1f}%",
+            f"Racha>={umbral_racha:.0f}% + Pois>={umbral_poisson:.0f}%": (
+                "OK"
+                if (o_l >= umbral_racha and o_v >= umbral_racha and p_over_pct >= umbral_poisson)
+                else "No"
+            ),
         },
     ]
 
-    if u_l >= umbral_racha and u_v >= umbral_racha:
+    if u_l >= umbral_racha and u_v >= umbral_racha and p_under_pct >= umbral_poisson:
         return {
             "decision": "APOSTAR",
             "mercado": "-2.5 goles",
             "racha_local": u_l,
             "racha_vis": u_v,
+            "prob_poisson": p_under_pct,
             "xg_total": xg_total,
-            "p_over_25": round(p_over * 100, 1),
-            "p_under_25": round(p_under * 100, 1),
+            "p_over_25": p_over_pct,
+            "p_under_25": p_under_pct,
             "desglose": desglose,
         }
 
-    if o_l >= umbral_racha and o_v >= umbral_racha:
+    if o_l >= umbral_racha and o_v >= umbral_racha and p_over_pct >= umbral_poisson:
         return {
             "decision": "APOSTAR",
             "mercado": "+2.5 goles",
             "racha_local": o_l,
             "racha_vis": o_v,
+            "prob_poisson": p_over_pct,
             "xg_total": xg_total,
-            "p_over_25": round(p_over * 100, 1),
-            "p_under_25": round(p_under * 100, 1),
+            "p_over_25": p_over_pct,
+            "p_under_25": p_under_pct,
             "desglose": desglose,
         }
 
+    if u_l >= umbral_racha and u_v >= umbral_racha:
+        motivo = (
+            f"Cumple racha -2.5 ({u_l:.1f}% vs {u_v:.1f}%), pero Poisson es {p_under_pct:.1f}% "
+            f"(mínimo {umbral_poisson:.0f}%)."
+        )
+    elif o_l >= umbral_racha and o_v >= umbral_racha:
+        motivo = (
+            f"Cumple racha +2.5 ({o_l:.1f}% vs {o_v:.1f}%), pero Poisson es {p_over_pct:.1f}% "
+            f"(mínimo {umbral_poisson:.0f}%)."
+        )
+    else:
+        motivo = (
+            f"No ambos equipos alcanzan el {umbral_racha:.0f}% en la misma línea "
+            f"(-2.5: {u_l:.1f}% vs {u_v:.1f}% | +2.5: {o_l:.1f}% vs {o_v:.1f}%)."
+        )
+
     return {
         "decision": "NO APOSTAR",
-        "motivo": (
-            f"No ambos equipos alcanzan el {umbral_racha:.0f}% en la misma línea en sus últimos 10 partidos "
-            f"(-2.5: {u_l:.1f}% vs {u_v:.1f}% | +2.5: {o_l:.1f}% vs {o_v:.1f}%)."
-        ),
+        "motivo": motivo,
         "xg_total": xg_total,
-        "p_over_25": round(p_over * 100, 1),
-        "p_under_25": round(p_under * 100, 1),
+        "p_over_25": p_over_pct,
+        "p_under_25": p_under_pct,
         "desglose": desglose,
     }
 
@@ -1709,7 +1779,8 @@ def renderizar_resultado(resultado: dict, partido_label: str) -> None:
     if resultado["decision"] == "APOSTAR":
         st.success(
             f"### ✅ APOSTAR → {resultado['mercado'].upper()}\n"
-            f"**Racha en 10 PJ:** Local `{resultado['racha_local']:.1f}%` · Visitante `{resultado['racha_vis']:.1f}%`"
+            f"**Racha en 10 PJ:** Local `{resultado['racha_local']:.1f}%` · Visitante `{resultado['racha_vis']:.1f}%` | "
+            f"**Poisson:** `{resultado['prob_poisson']:.1f}%`"
         )
     else:
         st.warning(f"### ⛔ NO APOSTAR\n{resultado['motivo']}")
@@ -1935,7 +2006,7 @@ def _calcular_desde_capturas_3(
 reset_id = int(st.session_state.get("uploader_reset_id", 0))
 
 st.title("⚽ Detector de Goles (+2.5 / -2.5)")
-st.caption("3 capturas manuales (partido + 10 últimos del local + 10 últimos del visitante) y regla del 60%.")
+st.caption("3 capturas manuales (partido + 10 últimos del local + 10 últimos del visitante) · Filtro híbrido Racha + Poisson.")
 
 tab_poisson, tab_lote, tab_detector, tab_registro = st.tabs(
     ["Análisis Poisson", "Evaluador rápido", "Detector (+2.5 / -2.5)", "Registro de análisis"]
@@ -2175,6 +2246,14 @@ with tab_poisson:
             step=0.10,
             key="goal_max_lambda",
         )
+        g_umbral_poisson = st.slider(
+            "Probabilidad mínima Poisson (%)",
+            min_value=50.0,
+            max_value=75.0,
+            value=UMBRAL_POISSON_POR_DEFECTO,
+            step=1.0,
+            key="goal_umbral_poisson",
+        )
 
     g_nota = st.text_input("Nota rápida (opcional)", key="goal_nota_input")
 
@@ -2215,6 +2294,7 @@ with tab_poisson:
                     "nota": g_nota,
                     "home_fallback": g_home_input or "Local",
                     "away_fallback": g_away_input or "Visitante",
+                    "umbral_poisson": float(st.session_state.get("goal_umbral_poisson", UMBRAL_POISSON_POR_DEFECTO)),
                 }
         except Exception as exc:
             st.error(f"Error al calcular pronóstico: {exc}")
@@ -2227,6 +2307,7 @@ with tab_poisson:
         mg = res_g["markets"]
         hs = res_g["home_stats"]
         aws = res_g["away_stats"]
+        umbral_p_act = float(ultimo_g.get("umbral_poisson", UMBRAL_POISSON_POR_DEFECTO))
         pron = seleccionar_pronostico_goal(
             markets=mg,
             home_stats=hs,
@@ -2235,6 +2316,7 @@ with tab_poisson:
             mismo_equipo=res_g.get("mismo_equipo", False),
             muestra_insuficiente=res_g.get("muestra_insuficiente", False),
             umbral_racha=UMBRAL_RACHA_POR_DEFECTO,
+            umbral_poisson=umbral_p_act,
         )
         ex = pron.get("resultado_exacto", {})
         top3_txt = " | ".join(
@@ -2307,16 +2389,22 @@ with tab_poisson:
         if pron.get("apostar") and pron.get("pick") == "UNDER 2.5 GOLES":
             exacto_recomendado_txt = under_marcador_val
             st.success(
-                f"### ✅ PRONÓSTICO → {pron['pick']} | EXACTO (-2.5) → `{under_marcador_val}`\n"
-                f"**Racha {UMBRAL_RACHA_POR_DEFECTO:.0f}%:** Local `{r_home_val:.1f}%` · Visitante `{r_away_val:.1f}%` | "
-                f"**Prob. modelo -2.5:** `{prob_val:.1f}%` (cuota justa `{cuota_justa_val}`)\n\n"
+                f"### ✅ DOBLE CONFIRMACIÓN → {pron['pick']} | EXACTO (-2.5) → `{under_marcador_val}`\n"
+                f"**Racha ≥ {UMBRAL_RACHA_POR_DEFECTO:.0f}%:** Local `{r_home_val:.1f}%` · Visitante `{r_away_val:.1f}%` | "
+                f"**Poisson:** `{prob_val:.1f}%` (≥ {umbral_p_act:.0f}% · cuota justa `{cuota_justa_val}`)\n\n"
                 f"**Marcadores exactos (-2.5) más probables:** {under_top3_txt}"
             )
         elif pron.get("apostar") and pron.get("pick") == "OVER 2.5 GOLES":
             st.success(
-                f"### ✅ PRONÓSTICO → {pron['pick']} (sin exacto; solo en -2.5 goles)\n"
-                f"**Racha {UMBRAL_RACHA_POR_DEFECTO:.0f}%:** Local `{r_home_val:.1f}%` · Visitante `{r_away_val:.1f}%` | "
-                f"**Prob. modelo +2.5:** `{prob_val:.1f}%` (cuota justa `{cuota_justa_val}`)\n\n"
+                f"### ✅ DOBLE CONFIRMACIÓN → {pron['pick']} (sin exacto; solo en -2.5 goles)\n"
+                f"**Racha ≥ {UMBRAL_RACHA_POR_DEFECTO:.0f}%:** Local `{r_home_val:.1f}%` · Visitante `{r_away_val:.1f}%` | "
+                f"**Poisson:** `{prob_val:.1f}%` (≥ {umbral_p_act:.0f}% · cuota justa `{cuota_justa_val}`)\n\n"
+                f"*Referencia general marcadores:* {top3_txt}"
+            )
+        elif pron.get("senal_parcial"):
+            st.warning(
+                f"### ⚠️ SEÑAL PARCIAL (SOLO RACHA)\n"
+                f"{pron.get('motivo', '')}\n\n"
                 f"*Referencia general marcadores:* {top3_txt}"
             )
         else:
@@ -2361,7 +2449,7 @@ with tab_poisson:
 with tab_lote:
     st.subheader("Evaluador rápido de varios partidos")
     st.caption(
-        "Pega un partido por línea (`Local vs Visitante`). Evalúa la regla del 60% sin mirar cuotas y muestra exacto solo en `-2.5 goles`."
+        "Pega un partido por línea (`Local vs Visitante`). Evalúa Racha ≥ 60 % + Poisson ≥ 58 % y muestra exacto solo en `-2.5 goles`."
     )
     goal_key_manual = st.text_input(
         "GOAL_KEY (opcional si ya está en Secrets o entorno)",
@@ -2406,6 +2494,7 @@ with tab_lote:
                         mismo_equipo=r_p.get("mismo_equipo", False),
                         muestra_insuficiente=r_p.get("muestra_insuficiente", False),
                         umbral_racha=UMBRAL_RACHA_POR_DEFECTO,
+                        umbral_poisson=UMBRAL_POISSON_POR_DEFECTO,
                     )
                     ex_p = sel_p.get("resultado_exacto", {})
                     exacto_col = (
@@ -2418,7 +2507,8 @@ with tab_lote:
                             "Partido": f"{r_p['home_team'].get('name')} vs {r_p['away_team'].get('name')}",
                             "-2.5 (10 PJ)": f"{r_p['home_stats'].get('under25_rate', 0)}% / {r_p['away_stats'].get('under25_rate', 0)}%",
                             "+2.5 (10 PJ)": f"{r_p['home_stats'].get('over25_rate', 0)}% / {r_p['away_stats'].get('over25_rate', 0)}%",
-                            "Decisión": "✅ APOSTAR" if sel_p.get("apostar") else "⛔ NO",
+                            "Poisson": f"{sel_p.get('prob_poisson', 0.0):.1f}%",
+                            "Decisión": "✅ APOSTAR" if sel_p.get("apostar") else ("⚠️ Parcial" if sel_p.get("senal_parcial") else "⛔ NO"),
                             "Pick": sel_p.get("pick", "NO APOSTAR"),
                             "Exacto (-2.5)": exacto_col,
                         }
@@ -2429,6 +2519,7 @@ with tab_lote:
                             "Partido": f"{loc_q} vs {vis_q}",
                             "-2.5 (10 PJ)": "-",
                             "+2.5 (10 PJ)": "-",
+                            "Poisson": "-",
                             "Decisión": "⚠️ Error",
                             "Pick": str(exc_l),
                             "Exacto (-2.5)": "-",
@@ -2690,6 +2781,7 @@ with tab_detector:
         over25_rate_local=round(100.0 - float(under25_local_10), 1),
         over25_rate_vis=round(100.0 - float(under25_vis_10), 1),
         umbral_racha=UMBRAL_RACHA_POR_DEFECTO,
+        umbral_poisson=UMBRAL_POISSON_POR_DEFECTO,
     )
 
     p_l_lbl = f" ({det_pais_local.strip()})" if det_pais_local.strip() else ""
