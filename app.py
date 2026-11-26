@@ -582,13 +582,6 @@ def poisson_pmf(k: int, lam: float) -> float:
     return (math.exp(-lam) * (lam**k)) / math.factorial(k)
 
 
-def _goles_en_marcador(marcador: str) -> int:
-    partes = re.findall(r"\d+", marcador or "")
-    if len(partes) >= 2:
-        return int(partes[0]) + int(partes[1])
-    return 99
-
-
 def calculate_poisson_markets(
     lam_home: float,
     lam_away: float,
@@ -766,7 +759,7 @@ def seleccionar_pronostico_goal(
         return {
             "apostar": False,
             "pick": "NO APOSTAR",
-            "motivo": "Muestra insuficiente (se requieren al menos 6 partidos finalizados por equipo).",
+            "motivo": "Muestra insuficiente (se requieren al menos 6 partidos por equipo).",
             "resultado_exacto": resultado_exacto,
         }
 
@@ -975,6 +968,107 @@ def ejecutar_ocr_bytes(img_bytes: bytes, psm: int = 11) -> str:
     procesada = preparar_imagen_ocr(imagen)
     config = f"--oem 3 --psm {psm}"
     return pytesseract.image_to_string(procesada, lang="spa+eng", config=config)
+
+
+def extraer_marcadores_ocr(texto_ocr: str, max_partidos: int = 10) -> list[tuple[int, int]]:
+    """Extrae pares de goles (goles_1, goles_2) desde el texto OCR de un historial de partidos."""
+    pares: list[tuple[int, int]] = []
+    for linea in (texto_ocr or "").splitlines():
+        limpia = linea.strip()
+        if not limpia:
+            continue
+        # Ignora horas tipo 20:30 o fechas tipo 26/11
+        if re.search(r"\b\d{1,2}:\d{2}\b", limpia):
+            continue
+        for match in re.finditer(r"(?<!\d)(\d)\s*[-–—:]\s*(\d)(?!\d)", limpia):
+            g1 = int(match.group(1))
+            g2 = int(match.group(2))
+            if g1 <= 9 and g2 <= 9:
+                pares.append((g1, g2))
+                if len(pares) >= max_partidos:
+                    return pares
+    return pares
+
+
+def parsear_marcadores_texto(texto_marcadores: str, max_partidos: int = 10) -> list[tuple[int, int]]:
+    """Convierte texto con marcadores (ej. '1-0, 2-1, 0-0') en tuplas (g1, g2)."""
+    pares: list[tuple[int, int]] = []
+    for match in re.finditer(r"(\d+)\s*[-–—:/]\s*(\d+)", texto_marcadores or ""):
+        g1 = int(match.group(1))
+        g2 = int(match.group(2))
+        if g1 <= 15 and g2 <= 15:
+            pares.append((g1, g2))
+            if len(pares) >= max_partidos:
+                break
+    return pares
+
+
+def construir_stats_desde_marcadores(
+    marcadores: list[tuple[int, int]],
+    equipo_nombre: str,
+    es_local_en_proximo: bool = True,
+) -> dict:
+    """Construye la estructura de estadísticas de últimos N partidos a partir de marcadores leídos/editados."""
+    n = len(marcadores)
+    if n == 0:
+        return {
+            "count": 0,
+            "gf_avg": 0.0,
+            "ga_avg": 0.0,
+            "total_avg": 0.0,
+            "over25_rate": 0.0,
+            "under25_rate": 0.0,
+            "venue_used": False,
+            "matches": [],
+        }
+
+    gf_w_sum = 0.0
+    ga_w_sum = 0.0
+    w_sum = 0.0
+    over25_count = 0
+    rows = []
+
+    for idx, (g1, g2) in enumerate(marcadores):
+        # Por defecto en tablas de últimos partidos del equipo, el primer número suele ser GF y el segundo GC
+        gf_real = g1
+        ga_real = g2
+        total_real = gf_real + ga_real
+
+        if total_real >= 3:
+            over25_count += 1
+
+        peso = 0.90**idx
+        gf_w_sum += min(gf_real, 5) * peso
+        ga_w_sum += min(ga_real, 5) * peso
+        w_sum += peso
+
+        rows.append(
+            {
+                "N.º": idx + 1,
+                "Equipo": equipo_nombre or ("Local" if es_local_en_proximo else "Visitante"),
+                "Marcador": f"{gf_real} - {ga_real}",
+                "GF": gf_real,
+                "GC": ga_real,
+                "Total": total_real,
+                "Línea": "+2.5" if total_real >= 3 else "-2.5",
+            }
+        )
+
+    gf_avg = gf_w_sum / w_sum if w_sum > 0 else 0.0
+    ga_avg = ga_w_sum / w_sum if w_sum > 0 else 0.0
+    over_rate = round((over25_count / n) * 100, 1)
+    under_rate = round(100.0 - over_rate, 1)
+
+    return {
+        "count": n,
+        "gf_avg": gf_avg,
+        "ga_avg": ga_avg,
+        "total_avg": gf_avg + ga_avg,
+        "over25_rate": over_rate,
+        "under25_rate": under_rate,
+        "venue_used": False,
+        "matches": rows,
+    }
 
 
 def _es_token_basura_ocr(token: str) -> bool:
@@ -1339,11 +1433,6 @@ def renderizar_resultado(resultado: dict, partido_label: str) -> None:
 
 
 def _parsear_lote_partidos(texto_lote: str) -> list[tuple[str, str]]:
-    """
-    Parsea líneas en formato:
-    Equipo Local vs Equipo Visitante
-    (si incluye '|' o cuotas al final, ignora las cuotas para centrarse en los últimos 10 partidos).
-    """
     filas: list[tuple[str, str]] = []
     for raw in (texto_lote or "").splitlines():
         linea = raw.strip()
@@ -1370,23 +1459,18 @@ for clave, valor_ini in {
     "api_warn_msg": "",
     "analisis_log": [],
     "ultimo_goal_analisis": None,
-    "goal_home_input": "Walter Ferretti",
-    "goal_away_input": "Sport Sébaco",
-    "goal_country_input": "Nicaragua",
-    "ultimo_ocr_goal_file": None,
+    "goal_home_input": "",
+    "goal_away_input": "",
+    "goal_country_input": "",
+    "ultimo_ocr_partido_file": None,
+    "ultimo_ocr_local_10_file": None,
+    "ultimo_ocr_vis_10_file": None,
+    "marcadores_local_10_txt": "",
+    "marcadores_vis_10_txt": "",
     "lote_partidos_texto": "",
 }.items():
     if clave not in st.session_state:
         st.session_state[clave] = valor_ini
-
-
-def _aplicar_preset_goal() -> None:
-    seleccion = st.session_state.get("goal_preset_select")
-    if seleccion in QUICK_PRESETS_GOAL and seleccion != "Personalizado":
-        h, a, c = QUICK_PRESETS_GOAL[seleccion]
-        st.session_state["goal_home_input"] = h
-        st.session_state["goal_away_input"] = a
-        st.session_state["goal_country_input"] = c
 
 
 def _limpiar_partido_goal() -> None:
@@ -1394,50 +1478,100 @@ def _limpiar_partido_goal() -> None:
     st.session_state["goal_away_input"] = ""
     st.session_state["goal_country_input"] = ""
     st.session_state["goal_nota_input"] = ""
+    st.session_state["marcadores_local_10_txt"] = ""
+    st.session_state["marcadores_vis_10_txt"] = ""
     st.session_state["ultimo_goal_analisis"] = None
-    st.session_state["ultimo_ocr_goal_file"] = None
+    st.session_state["ultimo_ocr_partido_file"] = None
+    st.session_state["ultimo_ocr_local_10_file"] = None
+    st.session_state["ultimo_ocr_vis_10_file"] = None
+
+
+def _calcular_desde_capturas_3(
+    home_nombre: str,
+    away_nombre: str,
+    marcadores_l: list[tuple[int, int]],
+    marcadores_v: list[tuple[int, int]],
+    league_avg_per_side: float,
+    auto_league_avg: bool,
+    max_lambda: float,
+) -> dict:
+    loc_limpio = (home_nombre or "Local").strip() or "Local"
+    vis_limpio = (away_nombre or "Visitante").strip() or "Visitante"
+    mismo_equipo = normalizar_texto(loc_limpio) == normalizar_texto(vis_limpio)
+
+    hs = construir_stats_desde_marcadores(marcadores_l, loc_limpio, es_local_en_proximo=True)
+    aws = construir_stats_desde_marcadores(marcadores_v, vis_limpio, es_local_en_proximo=False)
+
+    manual_base = league_avg_per_side if league_avg_per_side > 0 else 1.30
+    if auto_league_avg and hs["count"] > 0 and aws["count"] > 0:
+        observada = (hs["total_avg"] + aws["total_avg"]) / 4.0
+        base = max(0.85, min(1.95, (0.65 * observada) + (0.35 * manual_base)))
+    else:
+        base = manual_base
+
+    n_h = max(1, hs["count"])
+    n_a = max(1, aws["count"])
+    prior_h = 1.5 if n_h >= 10 else 3.0
+    prior_a = 1.5 if n_a >= 10 else 3.0
+
+    gf_h_smooth = ((hs["gf_avg"] * n_h) + (base * prior_h)) / (n_h + prior_h)
+    ga_h_smooth = ((hs["ga_avg"] * n_h) + (base * prior_h)) / (n_h + prior_h)
+    gf_a_smooth = ((aws["gf_avg"] * n_a) + (base * prior_a)) / (n_a + prior_a)
+    ga_a_smooth = ((aws["ga_avg"] * n_a) + (base * prior_a)) / (n_a + prior_a)
+
+    raw_lam_home = ((gf_h_smooth / base) * (ga_a_smooth / base)) * base * 1.05
+    raw_lam_away = ((gf_a_smooth / base) * (ga_h_smooth / base)) * base * 0.96
+
+    cap = max(0.5, float(max_lambda))
+    lam_home = min(max(0.20, raw_lam_home), cap)
+    lam_away = min(max(0.20, raw_lam_away), cap)
+
+    warnings: list[str] = []
+    if mismo_equipo:
+        warnings.append("Local y visitante tienen el mismo nombre.")
+    if hs["count"] < 10:
+        warnings.append(f"{loc_limpio}: se detectaron {hs['count']} marcadores (ideal: 10).")
+    if aws["count"] < 10:
+        warnings.append(f"{vis_limpio}: se detectaron {aws['count']} marcadores (ideal: 10).")
+
+    muestra_insuficiente = hs["count"] < 6 or aws["count"] < 6
+    markets = calculate_poisson_markets(lam_home=lam_home, lam_away=lam_away)
+
+    return {
+        "home_team": {"name": loc_limpio, "country": "Captura manual"},
+        "away_team": {"name": vis_limpio, "country": "Captura manual"},
+        "home_stats": hs,
+        "away_stats": aws,
+        "base_used": round(base, 2),
+        "markets": markets,
+        "warnings": warnings,
+        "mismo_equipo": mismo_equipo,
+        "muestra_insuficiente": muestra_insuficiente,
+    }
 
 
 st.title("⚽ Detector de Goles (+2.5 / -2.5)")
-st.caption("Regla del 70% en últimos 10 partidos (sin depender de cuotas) y exacto en -2.5 goles.")
+st.caption("3 capturas manuales (partido + 10 últimos del local + 10 últimos del visitante) y regla del 70%.")
 
 tab_poisson, tab_lote, tab_detector, tab_registro = st.tabs(
     ["Análisis Poisson", "Evaluador rápido", "Detector (+2.5 / -2.5)", "Registro de análisis"]
 )
 
 with tab_poisson:
-    st.subheader("Modelo Poisson — GOAL API")
+    st.subheader("Análisis con 3 capturas manuales")
     st.caption(
-        "+-2.5 goles por racha del 70% en ambos equipos (últimos 10 partidos); resultado exacto activado solo en UNDER 2.5 goles."
+        "Sube: 1) captura del partido, 2) últimos 10 partidos del local y 3) últimos 10 partidos del visitante."
     )
-    goal_key_manual = st.text_input(
-        "GOAL_KEY (opcional si ya está en Secrets o entorno)",
-        type="password",
-        key="goal_key_manual_input",
-    )
-    goal_key_activa = obtener_goal_key(goal_key_manual)
 
-    col_p1, col_p2 = st.columns([3, 1.3])
-    col_p1.selectbox(
-        "Acceso rápido",
-        options=list(QUICK_PRESETS_GOAL.keys()),
-        index=1,
-        key="goal_preset_select",
-        on_change=_aplicar_preset_goal,
-    )
-    col_p2.markdown("<br>", unsafe_allow_html=True)
-    col_p2.button(
+    col_top_l, col_top_r = st.columns([3.5, 1.2])
+    col_top_l.markdown("**Paso 1 · Captura del partido**")
+    col_top_r.button(
         "🧹 Limpiar",
         key="btn_clear_goal",
         on_click=_limpiar_partido_goal,
         width="stretch",
     )
 
-    archivo_goal = st.file_uploader(
-        "Sube una captura del partido para sugerir los equipos en Poisson",
-        type=["png", "jpg", "jpeg", "webp"],
-        key="goal_ocr_uploader",
-    )
     psm_goal = st.selectbox(
         "Modo OCR (PSM)",
         options=[11, 6, 4, 3],
@@ -1445,87 +1579,168 @@ with tab_poisson:
         key="goal_ocr_psm",
     )
 
-    if archivo_goal is not None:
-        img_bytes_g = archivo_goal.getvalue()
-        img_g = Image.open(BytesIO(img_bytes_g))
+    archivo_partido = st.file_uploader(
+        "1. Captura del partido a analizar",
+        type=["png", "jpg", "jpeg", "webp"],
+        key="ocr_partido_uploader",
+    )
+    if archivo_partido is not None:
+        img_p_bytes = archivo_partido.getvalue()
+        img_p = Image.open(BytesIO(img_p_bytes))
         st.image(
-            img_g,
-            caption=f"Captura GOAL ({img_g.width}x{img_g.height} px)",
+            img_p,
+            caption=f"1. Partido ({img_p.width}x{img_p.height} px)",
             width="stretch",
         )
         try:
-            texto_ocr_g = ejecutar_ocr_bytes(img_bytes_g, psm=psm_goal)
-            loc_ocr_g, vis_ocr_g = sugerir_equipos_candidatos(texto_ocr_g)
-            marca_ocr = f"{archivo_goal.file_id}_{psm_goal}"
-            if st.session_state.get("ultimo_ocr_goal_file") != marca_ocr:
-                st.session_state["goal_home_input"] = loc_ocr_g
-                st.session_state["goal_away_input"] = vis_ocr_g
-                st.session_state["goal_country_input"] = ""
-                st.session_state["ultimo_ocr_goal_file"] = marca_ocr
-            with st.expander("Ver texto OCR detectado (GOAL API)"):
-                st.text(texto_ocr_g if texto_ocr_g.strip() else "No se detectó texto.")
+            txt_p = ejecutar_ocr_bytes(img_p_bytes, psm=psm_goal)
+            loc_ocr, vis_ocr = sugerir_equipos_candidatos(txt_p)
+            marca_p = f"{archivo_partido.file_id}_{psm_goal}"
+            if st.session_state.get("ultimo_ocr_partido_file") != marca_p:
+                if loc_ocr:
+                    st.session_state["goal_home_input"] = loc_ocr
+                if vis_ocr:
+                    st.session_state["goal_away_input"] = vis_ocr
+                st.session_state["ultimo_ocr_partido_file"] = marca_p
+            with st.expander("Ver texto OCR — Captura 1 (Partido)"):
+                st.text(txt_p if txt_p.strip() else "No se detectó texto.")
         except Exception as exc:
-            st.error(f"Error al ejecutar OCR: {exc}")
+            st.error(f"Error al leer captura del partido: {exc}")
 
-    gc1, gc2, gc3 = st.columns([2, 2, 1.5])
+    gc1, gc2 = st.columns(2)
     g_home_input = gc1.text_input("Equipo Local", key="goal_home_input")
     g_away_input = gc2.text_input("Equipo Visitante", key="goal_away_input")
-    g_country_input = gc3.text_input("País (opcional)", key="goal_country_input")
 
-    gp1, gp2 = st.columns(2)
-    g_last_n = gp1.slider(
-        "Últimos partidos", min_value=6, max_value=15, value=10, key="goal_last_n"
+    st.markdown("**Paso 2 · Captura de los últimos 10 partidos del Equipo Local**")
+    archivo_local_10 = st.file_uploader(
+        "2. Últimos 10 partidos — Local",
+        type=["png", "jpg", "jpeg", "webp"],
+        key="ocr_local_10_uploader",
     )
-    g_league_avg = gp2.number_input(
-        "Media base goles/equipo",
-        min_value=0.6,
-        max_value=2.5,
-        value=1.30,
-        step=0.05,
-        key="goal_league_avg",
-    )
-    g_auto_league = st.checkbox(
-        "Adaptar automáticamente la media de goles al ritmo real de ambos equipos",
-        value=True,
-        key="goal_auto_league",
+    if archivo_local_10 is not None:
+        img_l_bytes = archivo_local_10.getvalue()
+        img_l = Image.open(BytesIO(img_l_bytes))
+        st.image(
+            img_l,
+            caption=f"2. Últimos 10 Local ({img_l.width}x{img_l.height} px)",
+            width="stretch",
+        )
+        try:
+            txt_l = ejecutar_ocr_bytes(img_l_bytes, psm=psm_goal)
+            pares_l = extraer_marcadores_ocr(txt_l, max_partidos=10)
+            marca_l = f"{archivo_local_10.file_id}_{psm_goal}"
+            if st.session_state.get("ultimo_ocr_local_10_file") != marca_l:
+                st.session_state["marcadores_local_10_txt"] = ", ".join(
+                    f"{a}-{b}" for a, b in pares_l
+                )
+                st.session_state["ultimo_ocr_local_10_file"] = marca_l
+            with st.expander("Ver texto OCR — Captura 2 (10 últimos Local)"):
+                st.text(txt_l if txt_l.strip() else "No se detectó texto.")
+        except Exception as exc:
+            st.error(f"Error al leer captura del local: {exc}")
+
+    st.text_area(
+        "Marcadores detectados Local (puedes corregir o escribir a mano, ej.: 1-0, 2-1, 0-0)",
+        height=72,
+        key="marcadores_local_10_txt",
     )
 
-    g_max_lambda = st.slider(
-        "Límite máximo λ",
-        min_value=1.50,
-        max_value=4.50,
-        value=2.80,
-        step=0.10,
-        key="goal_max_lambda",
+    st.markdown("**Paso 3 · Captura de los últimos 10 partidos del Equipo Visitante**")
+    archivo_vis_10 = st.file_uploader(
+        "3. Últimos 10 partidos — Visitante",
+        type=["png", "jpg", "jpeg", "webp"],
+        key="ocr_vis_10_uploader",
     )
+    if archivo_vis_10 is not None:
+        img_v_bytes = archivo_vis_10.getvalue()
+        img_v = Image.open(BytesIO(img_v_bytes))
+        st.image(
+            img_v,
+            caption=f"3. Últimos 10 Visitante ({img_v.width}x{img_v.height} px)",
+            width="stretch",
+        )
+        try:
+            txt_v = ejecutar_ocr_bytes(img_v_bytes, psm=psm_goal)
+            pares_v = extraer_marcadores_ocr(txt_v, max_partidos=10)
+            marca_v = f"{archivo_vis_10.file_id}_{psm_goal}"
+            if st.session_state.get("ultimo_ocr_vis_10_file") != marca_v:
+                st.session_state["marcadores_vis_10_txt"] = ", ".join(
+                    f"{a}-{b}" for a, b in pares_v
+                )
+                st.session_state["ultimo_ocr_vis_10_file"] = marca_v
+            with st.expander("Ver texto OCR — Captura 3 (10 últimos Visitante)"):
+                st.text(txt_v if txt_v.strip() else "No se detectó texto.")
+        except Exception as exc:
+            st.error(f"Error al leer captura del visitante: {exc}")
+
+    st.text_area(
+        "Marcadores detectados Visitante (puedes corregir o escribir a mano, ej.: 0-1, 1-1, 2-0)",
+        height=72,
+        key="marcadores_vis_10_txt",
+    )
+
+    with st.expander("Ajustes avanzados del modelo"):
+        gp1, gp2 = st.columns(2)
+        g_league_avg = gp1.number_input(
+            "Media base goles/equipo",
+            min_value=0.6,
+            max_value=2.5,
+            value=1.30,
+            step=0.05,
+            key="goal_league_avg",
+        )
+        g_auto_league = gp2.checkbox(
+            "Adaptar media al ritmo real de ambos",
+            value=True,
+            key="goal_auto_league",
+        )
+        g_max_lambda = st.slider(
+            "Límite máximo λ",
+            min_value=1.50,
+            max_value=4.50,
+            value=2.80,
+            step=0.10,
+            key="goal_max_lambda",
+        )
+
     g_nota = st.text_input("Nota rápida (opcional)", key="goal_nota_input")
 
     if st.button(
-        "Calcular probabilidades",
+        "Calcular pronóstico desde las 3 capturas",
         type="primary",
         key="btn_calc_goal_poisson",
         width="stretch",
     ):
         try:
-            res_g = run_goal_matchup_poisson(
-                home_query=g_home_input,
-                away_query=g_away_input,
-                country_filter=g_country_input or None,
-                goal_key=goal_key_activa,
-                last_n=g_last_n,
-                league_avg_per_side=g_league_avg,
-                auto_league_avg=g_auto_league,
-                max_lambda=g_max_lambda,
+            pares_loc = parsear_marcadores_texto(
+                st.session_state.get("marcadores_local_10_txt", ""), max_partidos=10
             )
-            st.session_state["ultimo_goal_analisis"] = {
-                "res": res_g,
-                "last_n": g_last_n,
-                "nota": g_nota,
-                "home_fallback": g_home_input,
-                "away_fallback": g_away_input,
-            }
+            pares_vis = parsear_marcadores_texto(
+                st.session_state.get("marcadores_vis_10_txt", ""), max_partidos=10
+            )
+            if not pares_loc or not pares_vis:
+                st.error(
+                    "Necesitas marcadores válidos (formato ej. 1-0, 2-1) en ambos equipos para calcular."
+                )
+            else:
+                res_g = _calcular_desde_capturas_3(
+                    home_nombre=g_home_input,
+                    away_nombre=g_away_input,
+                    marcadores_l=pares_loc,
+                    marcadores_v=pares_vis,
+                    league_avg_per_side=g_league_avg,
+                    auto_league_avg=g_auto_league,
+                    max_lambda=g_max_lambda,
+                )
+                st.session_state["ultimo_goal_analisis"] = {
+                    "res": res_g,
+                    "last_n": max(len(pares_loc), len(pares_vis)),
+                    "nota": g_nota,
+                    "home_fallback": g_home_input or "Local",
+                    "away_fallback": g_away_input or "Visitante",
+                }
         except Exception as exc:
-            st.error(f"Error al calcular en GOAL API: {exc}")
+            st.error(f"Error al calcular pronóstico: {exc}")
 
     ultimo_g = st.session_state.get("ultimo_goal_analisis")
     if ultimo_g:
@@ -1556,15 +1771,15 @@ with tab_poisson:
             st.warning(f"⚠️ {aviso}")
 
         st.caption(
-            f"Equipos detectados: **{ht.get('name')}** (`{ht.get('country') or 'N/D'}`) "
-            f"vs **{at.get('name')}** (`{at.get('country') or 'N/D'}`) · "
+            f"Partido: **{ht.get('name')}** vs **{at.get('name')}** · "
+            f"Partidos analizados: `{hs['count']}` (Local) / `{aws['count']}` (Visitante) · "
             f"Media goles/equipo aplicada: `{res_g.get('base_used', 1.30)}`"
         )
 
         st.info(
-            f"**Trayectoria en últimos {ultimo_g['last_n']} partidos:** "
-            f"{ht.get('name')} → **-2.5:** `{hs.get('under25_rate', 0)}%` / **+2.5:** `{hs.get('over25_rate', 0)}%` | "
-            f"{at.get('name')} → **-2.5:** `{aws.get('under25_rate', 0)}%` / **+2.5:** `{aws.get('over25_rate', 0)}%`"
+            f"**Trayectoria en últimos partidos:** "
+            f"{ht.get('name')} ({hs['count']} PJ) → **-2.5:** `{hs.get('under25_rate', 0)}%` / **+2.5:** `{hs.get('over25_rate', 0)}%` | "
+            f"{at.get('name')} ({aws['count']} PJ) → **-2.5:** `{aws.get('under25_rate', 0)}%` / **+2.5:** `{aws.get('over25_rate', 0)}%`"
         )
 
         gm1, gm2, gm3 = st.columns(3)
@@ -1625,23 +1840,30 @@ with tab_poisson:
         with st.expander("Matriz de resultados exactos (% probabilidad)"):
             st.dataframe(mg["matrix_df"], width="stretch")
 
-        with st.expander("Últimos partidos usados en el cálculo"):
+        with st.expander("Partidos usados en el cálculo"):
             st.write(
                 f"**{ht.get('name')}** ({hs['count']} PJ — "
                 f"GF pond.: {hs['gf_avg']:.2f} | GC pond.: {hs['ga_avg']:.2f})"
             )
-            st.dataframe(pd.DataFrame(hs["matches"]), width="stretch")
+            st.dataframe(pd.DataFrame(hs["matches"]), width="stretch", hide_index=True)
             st.write(
                 f"**{at.get('name')}** ({aws['count']} PJ — "
                 f"GF pond.: {aws['gf_avg']:.2f} | GC pond.: {aws['ga_avg']:.2f})"
             )
-            st.dataframe(pd.DataFrame(aws["matches"]), width="stretch")
+            st.dataframe(pd.DataFrame(aws["matches"]), width="stretch", hide_index=True)
 
 with tab_lote:
     st.subheader("Evaluador rápido de varios partidos")
     st.caption(
-        "Pega un partido por línea (`Local vs Visitante`). Evalúa solo los últimos 10 partidos sin mirar cuotas y muestra exacto solo en `-2.5 goles`."
+        "Pega un partido por línea (`Local vs Visitante`). Evalúa la regla del 70% sin mirar cuotas y muestra exacto solo en `-2.5 goles`."
     )
+    goal_key_manual = st.text_input(
+        "GOAL_KEY (opcional si ya está en Secrets o entorno)",
+        type="password",
+        key="goal_key_manual_input",
+    )
+    goal_key_activa = obtener_goal_key(goal_key_manual)
+
     lote_country = st.text_input(
         "País común (opcional, deja vacío para búsqueda global)",
         key="lote_country_input",
@@ -1654,11 +1876,10 @@ with tab_lote:
     )
 
     if st.button("Analizar lote", type="primary", key="btn_analizar_lote", width="stretch"):
-        goal_key_lote = obtener_goal_key(st.session_state.get("goal_key_manual_input", ""))
         pares = _parsear_lote_partidos(lote_texto)
         if not pares:
             st.warning("Introduce al menos una línea válida con formato `Local vs Visitante`.")
-        elif not goal_key_lote:
+        elif not goal_key_activa:
             st.error("Falta GOAL_KEY en st.secrets o variables de entorno.")
         else:
             resumen_lote = []
@@ -1668,7 +1889,7 @@ with tab_lote:
                         home_query=loc_q,
                         away_query=vis_q,
                         country_filter=lote_country or None,
-                        goal_key=goal_key_lote,
+                        goal_key=goal_key_activa,
                         last_n=10,
                     )
                     sel_p = seleccionar_pronostico_goal(
