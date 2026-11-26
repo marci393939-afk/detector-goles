@@ -728,13 +728,6 @@ def seleccionar_pronostico_goal(
     muestra_insuficiente: bool = False,
     umbral_70: float = 70.0,
 ) -> dict:
-    """
-    Regla basada exclusivamente en el historial reciente (últimos 10 partidos),
-    sin depender de las cuotas de Winamax:
-    - Ambos equipos >= 70% en -2.5 goles -> UNDER 2.5 GOLES + activa marcador exacto <= 2 goles.
-    - Ambos equipos >= 70% en +2.5 goles -> OVER 2.5 GOLES (sin activar recomendación de exacto).
-    - En cualquier otro caso -> NO APOSTAR.
-    """
     resultado_exacto = {
         "marcador": markets["exact_score"],
         "prob": markets["exact_score_prob"],
@@ -970,24 +963,79 @@ def ejecutar_ocr_bytes(img_bytes: bytes, psm: int = 11) -> str:
     return pytesseract.image_to_string(procesada, lang="spa+eng", config=config)
 
 
+def _linea_es_fecha_o_hora(linea: str) -> bool:
+    if re.search(r"\b\d{1,2}:\d{2}\b", linea):
+        return True
+    if re.fullmatch(r"\d{1,2}[./-]\d{1,2}[./-]\d{2,4}", linea.strip()):
+        return True
+    return False
+
+
+def _linea_es_competicion_o_resultado(linea: str) -> bool:
+    limpia = linea.strip().upper()
+    if limpia in {"G", "P", "E", "W", "D", "L"}:
+        return True
+    if re.fullmatch(r"[A-Z]{1,4}\d{1,2}", limpia):
+        return True
+    return False
+
+
 def extraer_marcadores_ocr(texto_ocr: str, max_partidos: int = 10) -> list[tuple[int, int]]:
-    """Extrae pares de goles (goles_1, goles_2) desde el texto OCR de un historial de partidos."""
-    pares: list[tuple[int, int]] = []
-    for linea in (texto_ocr or "").splitlines():
-        limpia = linea.strip()
-        if not limpia:
+    """
+    Extrae pares de goles (goles_1, goles_2) desde el texto OCR de un historial de partidos.
+    Soporta tanto marcadores en la misma línea ('1 - 2', '1-0') como dígitos apilados en vertical
+    ('1' encima de '2' en filas/líneas sucesivas).
+    """
+    lineas = [l.strip() for l in (texto_ocr or "").splitlines() if l.strip()]
+
+    # 1. Intentar detectar pares en una misma línea (ej. 1-2, 0 - 0)
+    pares_inline: list[tuple[int, int]] = []
+    for linea in lineas:
+        if _linea_es_fecha_o_hora(linea):
             continue
-        # Ignora horas tipo 20:30 o fechas tipo 26/11
-        if re.search(r"\b\d{1,2}:\d{2}\b", limpia):
-            continue
-        for match in re.finditer(r"(?<!\d)(\d)\s*[-–—:]\s*(\d)(?!\d)", limpia):
-            g1 = int(match.group(1))
-            g2 = int(match.group(2))
+        for match in re.finditer(r"(?<!\d)(\d)\s*[-–—:]\s*(\d)(?!\d)", linea):
+            g1, g2 = int(match.group(1)), int(match.group(2))
             if g1 <= 9 and g2 <= 9:
-                pares.append((g1, g2))
-                if len(pares) >= max_partidos:
-                    return pares
-    return pares
+                pares_inline.append((g1, g2))
+                if len(pares_inline) >= max_partidos:
+                    return pares_inline
+
+    # 2. Si hay dígitos sueltos apilados en vertical, recoger dígitos de líneas limpias
+    digitos_sueltos: list[int] = []
+    for linea in lineas:
+        if _linea_es_fecha_o_hora(linea) or _linea_es_competicion_o_resultado(linea):
+            continue
+        # Ignora líneas que parezcan nombres de equipos (tienen letras largas o '1913')
+        if re.search(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]{3,}", linea):
+            continue
+        # Solo líneas cortas con 1 dígito (goles apilados en columna)
+        m_solitario = re.fullmatch(r"\D*(\d)\D*", linea)
+        if m_solitario:
+            val = int(m_solitario.group(1))
+            if 0 <= val <= 9:
+                digitos_sueltos.append(val)
+
+    pares_apilados: list[tuple[int, int]] = []
+    for i in range(0, len(digitos_sueltos) - 1, 2):
+        pares_apilados.append((digitos_sueltos[i], digitos_sueltos[i + 1]))
+        if len(pares_apilados) >= max_partidos:
+            break
+
+    if len(pares_apilados) > len(pares_inline):
+        return pares_apilados
+    return pares_inline
+
+
+def extraer_marcadores_desde_imagen(img_bytes: bytes, psm_preferido: int = 11) -> tuple[str, list[tuple[int, int]]]:
+    """Ejecuta OCR y devuelve (texto_ocr, marcadores), probando PSM 6 como respaldo si faltan partidos."""
+    texto = ejecutar_ocr_bytes(img_bytes, psm=psm_preferido)
+    pares = extraer_marcadores_ocr(texto, max_partidos=10)
+    if len(pares) < 6 and psm_preferido != 6:
+        texto_alt = ejecutar_ocr_bytes(img_bytes, psm=6)
+        pares_alt = extraer_marcadores_ocr(texto_alt, max_partidos=10)
+        if len(pares_alt) > len(pares):
+            return texto_alt, pares_alt
+    return texto, pares
 
 
 def parsear_marcadores_texto(texto_marcadores: str, max_partidos: int = 10) -> list[tuple[int, int]]:
@@ -1029,7 +1077,6 @@ def construir_stats_desde_marcadores(
     rows = []
 
     for idx, (g1, g2) in enumerate(marcadores):
-        # Por defecto en tablas de últimos partidos del equipo, el primer número suele ser GF y el segundo GC
         gf_real = g1
         ga_real = g2
         total_real = gf_real + ga_real
@@ -1346,10 +1393,6 @@ def evaluar_entrada_25(
     over25_rate_vis: float | None = None,
     umbral_70: float = 70.0,
 ) -> dict:
-    """
-    Evalúa +2.5 y -2.5 goles exclusivamente por trayectoria reciente (últimos 10 partidos),
-    sin depender de las cuotas de Winamax.
-    """
     probs = probs_over_under_25(xg_local, xg_visitante)
     xg_total = probs["xg_total"]
     p_over = probs["p_over_25"]
@@ -1626,8 +1669,7 @@ with tab_poisson:
             width="stretch",
         )
         try:
-            txt_l = ejecutar_ocr_bytes(img_l_bytes, psm=psm_goal)
-            pares_l = extraer_marcadores_ocr(txt_l, max_partidos=10)
+            txt_l, pares_l = extraer_marcadores_desde_imagen(img_l_bytes, psm_preferido=psm_goal)
             marca_l = f"{archivo_local_10.file_id}_{psm_goal}"
             if st.session_state.get("ultimo_ocr_local_10_file") != marca_l:
                 st.session_state["marcadores_local_10_txt"] = ", ".join(
@@ -1660,8 +1702,7 @@ with tab_poisson:
             width="stretch",
         )
         try:
-            txt_v = ejecutar_ocr_bytes(img_v_bytes, psm=psm_goal)
-            pares_v = extraer_marcadores_ocr(txt_v, max_partidos=10)
+            txt_v, pares_v = extraer_marcadores_desde_imagen(img_v_bytes, psm_preferido=psm_goal)
             marca_v = f"{archivo_vis_10.file_id}_{psm_goal}"
             if st.session_state.get("ultimo_ocr_vis_10_file") != marca_v:
                 st.session_state["marcadores_vis_10_txt"] = ", ".join(
