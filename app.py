@@ -408,6 +408,27 @@ def obtener_goal_key(key_manual: str = "") -> str:
         return ""
 
 
+def evaluar_ev_cuota(prob_raw: float | None, cuota_winamax: float | None) -> dict:
+    if not cuota_winamax or cuota_winamax <= 1.0 or not prob_raw or prob_raw <= 0.0:
+        return {
+            "tiene_cuota": False,
+            "es_ev_positivo": False,
+            "ev_pct": None,
+            "cuota_winamax": cuota_winamax if cuota_winamax and cuota_winamax > 1.0 else None,
+            "etiqueta": "SIN CUOTA",
+        }
+    ev_ratio = (float(prob_raw) * float(cuota_winamax)) - 1.0
+    ev_pct = round(ev_ratio * 100.0, 1)
+    es_pos = ev_ratio > 0.0
+    return {
+        "tiene_cuota": True,
+        "es_ev_positivo": es_pos,
+        "ev_pct": ev_pct,
+        "cuota_winamax": round(float(cuota_winamax), 2),
+        "etiqueta": "VALOR (+EV)" if es_pos else "SIN VALOR (-EV)",
+    }
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def api_get(endpoint: str, params_items: tuple[tuple[str, str], ...], api_key: str) -> dict:
     headers = {"x-apisports-key": api_key}
@@ -1162,6 +1183,10 @@ def registrar_analisis_goal(
     nota: str = "",
     pais_local: str = "",
     pais_visitante: str = "",
+    cuota_winamax_txt: str = "-",
+    cuota_justa_txt: str = "-",
+    ev_txt: str = "-",
+    valor_txt: str = "-",
 ) -> None:
     st.session_state["analisis_log"].append(
         {
@@ -1170,6 +1195,10 @@ def registrar_analisis_goal(
             "Visitante": away_name,
             "País Visitante": pais_visitante.strip() or "-",
             "Pronóstico": pronostico_txt,
+            "Cuota Winamax": cuota_winamax_txt,
+            "Cuota justa": cuota_justa_txt,
+            "% EV": ev_txt,
+            "Valor": valor_txt,
             "Exacto (-2.5)": exacto_txt,
             "Resultado exacto": m["exact_score"],
             "Prob. exacto (%)": m["exact_score_prob"],
@@ -1823,6 +1852,7 @@ for clave, valor_ini in {
     "goal_away_country_input": "",
     "goal_country_input": "",
     "goal_nota_input": "",
+    "goal_cuota_winamax_input": 0.0,
     "pais_ocr_detectado": "",
     "pais_status_msg": "",
     "ultimo_ocr_partido_file": None,
@@ -1850,6 +1880,7 @@ def _limpiar_partido_goal() -> None:
     st.session_state["goal_away_country_input"] = ""
     st.session_state["goal_country_input"] = ""
     st.session_state["goal_nota_input"] = ""
+    st.session_state["goal_cuota_winamax_input"] = 0.0
     st.session_state["pais_ocr_detectado"] = ""
     st.session_state["pais_status_msg"] = ""
     st.session_state["marcadores_local_10_txt"] = ""
@@ -2006,7 +2037,7 @@ def _calcular_desde_capturas_3(
 reset_id = int(st.session_state.get("uploader_reset_id", 0))
 
 st.title("⚽ Detector de Goles (+2.5 / -2.5)")
-st.caption("3 capturas manuales (partido + 10 últimos del local + 10 últimos del visitante) · Filtro híbrido Racha + Poisson.")
+st.caption("3 capturas manuales (partido + 10 últimos del local + 10 últimos del visitante) · Racha + Poisson + EV Winamax.")
 
 tab_poisson, tab_lote, tab_detector, tab_registro = st.tabs(
     ["Análisis Poisson", "Evaluador rápido", "Detector (+2.5 / -2.5)", "Registro de análisis"]
@@ -2223,6 +2254,19 @@ with tab_poisson:
         key="marcadores_vis_10_txt",
     )
 
+    with st.container(border=True):
+        st.markdown("**💶 Cuota en Winamax y nota**")
+        cn1, cn2 = st.columns([1.2, 2.3])
+        g_cuota_winamax = cn1.number_input(
+            "Cuota Winamax (+2.5 / -2.5)",
+            min_value=0.0,
+            max_value=20.0,
+            step=0.01,
+            format="%.2f",
+            key="goal_cuota_winamax_input",
+        )
+        g_nota = cn2.text_input("Nota rápida (opcional)", key="goal_nota_input")
+
     with st.expander("Ajustes avanzados del modelo"):
         gp1, gp2 = st.columns(2)
         g_league_avg = gp1.number_input(
@@ -2254,8 +2298,6 @@ with tab_poisson:
             step=1.0,
             key="goal_umbral_poisson",
         )
-
-    g_nota = st.text_input("Nota rápida (opcional)", key="goal_nota_input")
 
     if st.button(
         "Calcular pronóstico desde las 3 capturas",
@@ -2292,9 +2334,14 @@ with tab_poisson:
                     "res": res_g,
                     "last_n": max(len(pares_loc), len(pares_vis)),
                     "nota": g_nota,
+                    "cuota_winamax": float(
+                        st.session_state.get("goal_cuota_winamax_input", 0.0) or 0.0
+                    ),
                     "home_fallback": g_home_input or "Local",
                     "away_fallback": g_away_input or "Visitante",
-                    "umbral_poisson": float(st.session_state.get("goal_umbral_poisson", UMBRAL_POISSON_POR_DEFECTO)),
+                    "umbral_poisson": float(
+                        st.session_state.get("goal_umbral_poisson", UMBRAL_POISSON_POR_DEFECTO)
+                    ),
                 }
         except Exception as exc:
             st.error(f"Error al calcular pronóstico: {exc}")
@@ -2308,6 +2355,11 @@ with tab_poisson:
         hs = res_g["home_stats"]
         aws = res_g["away_stats"]
         umbral_p_act = float(ultimo_g.get("umbral_poisson", UMBRAL_POISSON_POR_DEFECTO))
+        cuota_w_act = float(
+            st.session_state.get("goal_cuota_winamax_input", ultimo_g.get("cuota_winamax", 0.0))
+            or 0.0
+        )
+
         pron = seleccionar_pronostico_goal(
             markets=mg,
             home_stats=hs,
@@ -2382,8 +2434,19 @@ with tab_poisson:
         r_home_val = float(pron.get("racha_home", hs.get("under25_rate", 0.0)))
         r_away_val = float(pron.get("racha_away", aws.get("under25_rate", 0.0)))
         prob_val = float(pron.get("prob", 0.0))
-        cuota_justa_val = pron.get("cuota_justa", "-")
+        prob_raw_val = float(pron.get("prob_raw", 0.0) or 0.0)
+        cuota_justa_val = pron.get("cuota_justa")
         under_marcador_val = ex.get("under_marcador", "-")
+
+        ev_info = evaluar_ev_cuota(prob_raw_val if pron.get("apostar") else None, cuota_w_act)
+        cuota_winamax_txt = f"{cuota_w_act:.2f}" if cuota_w_act > 1.0 else "-"
+        cuota_justa_txt = f"{float(cuota_justa_val):.2f}" if cuota_justa_val else "-"
+        ev_txt = (
+            f"{ev_info['ev_pct']:+.1f}%"
+            if ev_info["tiene_cuota"] and ev_info["ev_pct"] is not None
+            else "-"
+        )
+        valor_txt = ev_info["etiqueta"] if ev_info["tiene_cuota"] else "-"
 
         exacto_recomendado_txt = "-"
         if pron.get("apostar") and pron.get("pick") == "UNDER 2.5 GOLES":
@@ -2391,14 +2454,14 @@ with tab_poisson:
             st.success(
                 f"### ✅ DOBLE CONFIRMACIÓN → {pron['pick']} | EXACTO (-2.5) → `{under_marcador_val}`\n"
                 f"**Racha ≥ {UMBRAL_RACHA_POR_DEFECTO:.0f}%:** Local `{r_home_val:.1f}%` · Visitante `{r_away_val:.1f}%` | "
-                f"**Poisson:** `{prob_val:.1f}%` (≥ {umbral_p_act:.0f}% · cuota justa `{cuota_justa_val}`)\n\n"
+                f"**Poisson:** `{prob_val:.1f}%` (≥ {umbral_p_act:.0f}% · cuota justa `{cuota_justa_txt}`)\n\n"
                 f"**Marcadores exactos (-2.5) más probables:** {under_top3_txt}"
             )
         elif pron.get("apostar") and pron.get("pick") == "OVER 2.5 GOLES":
             st.success(
                 f"### ✅ DOBLE CONFIRMACIÓN → {pron['pick']} (sin exacto; solo en -2.5 goles)\n"
                 f"**Racha ≥ {UMBRAL_RACHA_POR_DEFECTO:.0f}%:** Local `{r_home_val:.1f}%` · Visitante `{r_away_val:.1f}%` | "
-                f"**Poisson:** `{prob_val:.1f}%` (≥ {umbral_p_act:.0f}% · cuota justa `{cuota_justa_val}`)\n\n"
+                f"**Poisson:** `{prob_val:.1f}%` (≥ {umbral_p_act:.0f}% · cuota justa `{cuota_justa_txt}`)\n\n"
                 f"*Referencia general marcadores:* {top3_txt}"
             )
         elif pron.get("senal_parcial"):
@@ -2414,6 +2477,25 @@ with tab_poisson:
                 f"*Referencia general marcadores:* {top3_txt}"
             )
 
+        if pron.get("apostar"):
+            if ev_info["tiene_cuota"]:
+                ev_c1, ev_c2, ev_c3 = st.columns(3)
+                ev_c1.metric("Cuota Winamax", f"{ev_info['cuota_winamax']:.2f}")
+                ev_c2.metric("Cuota justa Poisson", cuota_justa_txt)
+                ev_c3.metric("Esperanza (EV)", ev_txt, ev_info["etiqueta"])
+                if ev_info["es_ev_positivo"]:
+                    st.success(
+                        f"💎 **VALOR (+EV):** Winamax paga `{ev_info['cuota_winamax']:.2f}` frente a una cuota justa de `{cuota_justa_txt}` (`{ev_txt}` de ventaja teórica)."
+                    )
+                else:
+                    st.warning(
+                        f"📉 **SIN VALOR (-EV):** Winamax paga `{ev_info['cuota_winamax']:.2f}`, por debajo de la cuota justa de `{cuota_justa_txt}` (`{ev_txt}`)."
+                    )
+            else:
+                st.caption(
+                    f"💡 Introduce la **Cuota Winamax** arriba para comparar frente a la cuota justa de Poisson (`{cuota_justa_txt}`) y calcular el **+EV**."
+                )
+
         if st.button("Guardar en registro", key="btn_save_goal_log", width="stretch"):
             registrar_analisis_goal(
                 home_name=ht.get("name") or ultimo_g["home_fallback"],
@@ -2428,6 +2510,10 @@ with tab_poisson:
                 nota=ultimo_g["nota"],
                 pais_local=pais_loc_res,
                 pais_visitante=pais_vis_res,
+                cuota_winamax_txt=cuota_winamax_txt,
+                cuota_justa_txt=cuota_justa_txt,
+                ev_txt=ev_txt,
+                valor_txt=valor_txt,
             )
             st.success("Análisis guardado en la pestaña 'Registro de análisis'.")
 
