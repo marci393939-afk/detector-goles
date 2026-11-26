@@ -69,6 +69,8 @@ PAISES_BASE_INICIALES = {
     "songkhla": "Tailandia",
     "police tero": "Tailandia",
     "sukhothai": "Tailandia",
+    "al nasr": "Egipto",
+    "tersana": "Egipto",
 }
 
 PAISES_OCR_MAPA = {
@@ -78,6 +80,8 @@ PAISES_OCR_MAPA = {
     "NICARAGUA": "Nicaragua",
     "TAILANDIA": "Tailandia",
     "THAILAND": "Tailandia",
+    "EGIPTO": "Egipto",
+    "EGYPT": "Egipto",
     "ESPANA": "España",
     "ESPAÑA": "España",
     "SPAIN": "España",
@@ -118,7 +122,6 @@ PAISES_OCR_MAPA = {
     "JAPÓN": "Japón",
     "COREA DEL SUR": "Corea del Sur",
     "MARRUECOS": "Marruecos",
-    "EGIPTO": "Egipto",
     "SUDAFRICA": "Sudáfrica",
     "SUDÁFRICA": "Sudáfrica",
     "NIGERIA": "Nigeria",
@@ -909,9 +912,9 @@ def seleccionar_pronostico_goal(
     umbral_racha: float = UMBRAL_RACHA_POR_DEFECTO,
 ) -> dict:
     resultado_exacto = {
-        "marcador": markets["exact_score"],
-        "prob": markets["exact_score_prob"],
-        "cuota_justa": markets["exact_score_fair_odd"],
+        "marcador": markets.get("exact_score", "1 - 0"),
+        "prob": markets.get("exact_score_prob", 0.0),
+        "cuota_justa": markets.get("exact_score_fair_odd"),
         "top3": markets.get("top_exact_scores", []),
         "under_marcador": markets.get("under_exact_score", "1 - 0"),
         "under_prob": markets.get("under_exact_score_prob", 0.0),
@@ -920,11 +923,18 @@ def seleccionar_pronostico_goal(
         "exacto_activo": False,
     }
 
+    h_under = float((home_stats or {}).get("under25_rate", 0.0))
+    a_under = float((away_stats or {}).get("under25_rate", 0.0))
+    h_over = float((home_stats or {}).get("over25_rate", 0.0))
+    a_over = float((away_stats or {}).get("over25_rate", 0.0))
+
     if mismo_equipo:
         return {
             "apostar": False,
             "pick": "NO APOSTAR",
             "motivo": "Se detectó el mismo equipo para local y visitante. Revisa los nombres o el país.",
+            "racha_home": h_under,
+            "racha_away": a_under,
             "resultado_exacto": resultado_exacto,
         }
 
@@ -933,13 +943,10 @@ def seleccionar_pronostico_goal(
             "apostar": False,
             "pick": "NO APOSTAR",
             "motivo": "Muestra insuficiente (se requieren al menos 6 partidos por equipo).",
+            "racha_home": h_under,
+            "racha_away": a_under,
             "resultado_exacto": resultado_exacto,
         }
-
-    h_under = float(home_stats.get("under25_rate", 0.0))
-    a_under = float(away_stats.get("under25_rate", 0.0))
-    h_over = float(home_stats.get("over25_rate", 0.0))
-    a_over = float(away_stats.get("over25_rate", 0.0))
 
     if h_under >= umbral_racha and a_under >= umbral_racha:
         resultado_exacto["exacto_activo"] = True
@@ -947,9 +954,9 @@ def seleccionar_pronostico_goal(
             "apostar": True,
             "pick": "UNDER 2.5 GOLES",
             "cuota": cuota_u25,
-            "prob": round(markets["prob_under_25"] * 100, 1),
-            "prob_raw": markets["prob_under_25"],
-            "cuota_justa": markets["fair_under_25"],
+            "prob": round(float(markets.get("prob_under_25", 0.0)) * 100, 1),
+            "prob_raw": markets.get("prob_under_25", 0.0),
+            "cuota_justa": markets.get("fair_under_25"),
             "edge": markets.get("edge_under_25") or 0.0,
             "racha_home": h_under,
             "racha_away": a_under,
@@ -962,9 +969,9 @@ def seleccionar_pronostico_goal(
             "apostar": True,
             "pick": "OVER 2.5 GOLES",
             "cuota": cuota_o25,
-            "prob": round(markets["prob_over_25"] * 100, 1),
-            "prob_raw": markets["prob_over_25"],
-            "cuota_justa": markets["fair_over_25"],
+            "prob": round(float(markets.get("prob_over_25", 0.0)) * 100, 1),
+            "prob_raw": markets.get("prob_over_25", 0.0),
+            "cuota_justa": markets.get("fair_over_25"),
             "edge": markets.get("edge_over_25") or 0.0,
             "racha_home": h_over,
             "racha_away": a_over,
@@ -978,6 +985,8 @@ def seleccionar_pronostico_goal(
             f"No ambos equipos alcanzan el {umbral_racha:.0f}% en la misma línea "
             f"(-2.5: {h_under:.1f}% vs {a_under:.1f}% | +2.5: {h_over:.1f}% vs {a_over:.1f}%)."
         ),
+        "racha_home": h_under,
+        "racha_away": a_under,
         "resultado_exacto": resultado_exacto,
     }
 
@@ -2087,7 +2096,7 @@ with tab_poisson:
             muestra_insuficiente=res_g.get("muestra_insuficiente", False),
             umbral_racha=UMBRAL_RACHA_POR_DEFECTO,
         )
-        ex = pron["resultado_exacto"]
+        ex = pron.get("resultado_exacto", {})
         top3_txt = " | ".join(
             f"`{item['marcador']}` ({item['prob']:.1f}%)" for item in ex.get("top3", [])
         )
@@ -2170,26 +2179,32 @@ with tab_poisson:
             f"Cuota justa: {mg['fair_under_25']}",
         )
 
+        r_home_val = float(pron.get("racha_home", hs.get("under25_rate", 0.0)))
+        r_away_val = float(pron.get("racha_away", aws.get("under25_rate", 0.0)))
+        prob_val = float(pron.get("prob", 0.0))
+        cuota_justa_val = pron.get("cuota_justa", "-")
+        under_marcador_val = ex.get("under_marcador", "-")
+
         exacto_recomendado_txt = "-"
-        if pron["apostar"] and pron["pick"] == "UNDER 2.5 GOLES":
-            exacto_recomendado_txt = ex["under_marcador"]
+        if pron.get("apostar") and pron.get("pick") == "UNDER 2.5 GOLES":
+            exacto_recomendado_txt = under_marcador_val
             st.success(
-                f"### ✅ PRONÓSTICO → {pron['pick']} | EXACTO (-2.5) → `{ex['under_marcador']}`\n"
-                f"**Racha {UMBRAL_RACHA_POR_DEFECTO:.0f}%:** Local `{pron['racha_home']:.1f}%` · Visitante `{pron['racha_vis']:.1f}%` | "
-                f"**Prob. modelo -2.5:** `{pron['prob']:.1f}%` (cuota justa `{pron['cuota_justa']}`)\n\n"
+                f"### ✅ PRONÓSTICO → {pron['pick']} | EXACTO (-2.5) → `{under_marcador_val}`\n"
+                f"**Racha {UMBRAL_RACHA_POR_DEFECTO:.0f}%:** Local `{r_home_val:.1f}%` · Visitante `{r_away_val:.1f}%` | "
+                f"**Prob. modelo -2.5:** `{prob_val:.1f}%` (cuota justa `{cuota_justa_val}`)\n\n"
                 f"**Marcadores exactos (-2.5) más probables:** {under_top3_txt}"
             )
-        elif pron["apostar"] and pron["pick"] == "OVER 2.5 GOLES":
+        elif pron.get("apostar") and pron.get("pick") == "OVER 2.5 GOLES":
             st.success(
                 f"### ✅ PRONÓSTICO → {pron['pick']} (sin exacto; solo en -2.5 goles)\n"
-                f"**Racha {UMBRAL_RACHA_POR_DEFECTO:.0f}%:** Local `{pron['racha_home']:.1f}%` · Visitante `{pron['racha_vis']:.1f}%` | "
-                f"**Prob. modelo +2.5:** `{pron['prob']:.1f}%` (cuota justa `{pron['cuota_justa']}`)\n\n"
+                f"**Racha {UMBRAL_RACHA_POR_DEFECTO:.0f}%:** Local `{r_home_val:.1f}%` · Visitante `{r_away_val:.1f}%` | "
+                f"**Prob. modelo +2.5:** `{prob_val:.1f}%` (cuota justa `{cuota_justa_val}`)\n\n"
                 f"*Referencia general marcadores:* {top3_txt}"
             )
         else:
             st.warning(
                 f"### ⛔ NO APOSTAR\n"
-                f"{pron['motivo']}\n\n"
+                f"{pron.get('motivo', '')}\n\n"
                 f"*Referencia general marcadores:* {top3_txt}"
             )
 
@@ -2202,7 +2217,7 @@ with tab_poisson:
                 cuota_x=0.0,
                 cuota_o25=0.0,
                 cuota_u25=0.0,
-                pronostico_txt=pron["pick"],
+                pronostico_txt=pron.get("pick", "NO APOSTAR"),
                 exacto_txt=exacto_recomendado_txt,
                 nota=ultimo_g["nota"],
             )
@@ -2272,10 +2287,10 @@ with tab_lote:
                         muestra_insuficiente=r_p.get("muestra_insuficiente", False),
                         umbral_racha=UMBRAL_RACHA_POR_DEFECTO,
                     )
-                    ex_p = sel_p["resultado_exacto"]
+                    ex_p = sel_p.get("resultado_exacto", {})
                     exacto_col = (
-                        ex_p["under_marcador"]
-                        if (sel_p["apostar"] and sel_p["pick"] == "UNDER 2.5 GOLES")
+                        ex_p.get("under_marcador", "-")
+                        if (sel_p.get("apostar") and sel_p.get("pick") == "UNDER 2.5 GOLES")
                         else "-"
                     )
                     resumen_lote.append(
@@ -2283,8 +2298,8 @@ with tab_lote:
                             "Partido": f"{r_p['home_team'].get('name')} vs {r_p['away_team'].get('name')}",
                             "-2.5 (10 PJ)": f"{r_p['home_stats'].get('under25_rate', 0)}% / {r_p['away_stats'].get('under25_rate', 0)}%",
                             "+2.5 (10 PJ)": f"{r_p['home_stats'].get('over25_rate', 0)}% / {r_p['away_stats'].get('over25_rate', 0)}%",
-                            "Decisión": "✅ APOSTAR" if sel_p["apostar"] else "⛔ NO",
-                            "Pick": sel_p["pick"],
+                            "Decisión": "✅ APOSTAR" if sel_p.get("apostar") else "⛔ NO",
+                            "Pick": sel_p.get("pick", "NO APOSTAR"),
                             "Exacto (-2.5)": exacto_col,
                         }
                     )
