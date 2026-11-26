@@ -1183,7 +1183,8 @@ def registrar_analisis_goal(
     nota: str = "",
     pais_local: str = "",
     pais_visitante: str = "",
-    cuota_winamax_txt: str = "-",
+    cuota_o25_txt: str = "-",
+    cuota_u25_txt: str = "-",
     cuota_justa_txt: str = "-",
     ev_txt: str = "-",
     valor_txt: str = "-",
@@ -1195,7 +1196,8 @@ def registrar_analisis_goal(
             "Visitante": away_name,
             "País Visitante": pais_visitante.strip() or "-",
             "Pronóstico": pronostico_txt,
-            "Cuota Winamax": cuota_winamax_txt,
+            "Cuota +2.5": cuota_o25_txt,
+            "Cuota -2.5": cuota_u25_txt,
             "Cuota justa": cuota_justa_txt,
             "% EV": ev_txt,
             "Valor": valor_txt,
@@ -1852,7 +1854,8 @@ for clave, valor_ini in {
     "goal_away_country_input": "",
     "goal_country_input": "",
     "goal_nota_input": "",
-    "goal_cuota_winamax_input": 0.0,
+    "goal_cuota_o25_input": 0.0,
+    "goal_cuota_u25_input": 0.0,
     "pais_ocr_detectado": "",
     "pais_status_msg": "",
     "ultimo_ocr_partido_file": None,
@@ -1880,7 +1883,8 @@ def _limpiar_partido_goal() -> None:
     st.session_state["goal_away_country_input"] = ""
     st.session_state["goal_country_input"] = ""
     st.session_state["goal_nota_input"] = ""
-    st.session_state["goal_cuota_winamax_input"] = 0.0
+    st.session_state["goal_cuota_o25_input"] = 0.0
+    st.session_state["goal_cuota_u25_input"] = 0.0
     st.session_state["pais_ocr_detectado"] = ""
     st.session_state["pais_status_msg"] = ""
     st.session_state["marcadores_local_10_txt"] = ""
@@ -2255,17 +2259,25 @@ with tab_poisson:
     )
 
     with st.container(border=True):
-        st.markdown("**💶 Cuota en Winamax y nota**")
-        cn1, cn2 = st.columns([1.2, 2.3])
-        g_cuota_winamax = cn1.number_input(
-            "Cuota Winamax (+2.5 / -2.5)",
+        st.markdown("**💶 Cuotas en Winamax (+2.5 / -2.5) y nota**")
+        co1, co2, co3 = st.columns([1.0, 1.0, 1.8])
+        g_cuota_o25 = co1.number_input(
+            "Cuota Winamax +2.5",
             min_value=0.0,
             max_value=20.0,
             step=0.01,
             format="%.2f",
-            key="goal_cuota_winamax_input",
+            key="goal_cuota_o25_input",
         )
-        g_nota = cn2.text_input("Nota rápida (opcional)", key="goal_nota_input")
+        g_cuota_u25 = co2.number_input(
+            "Cuota Winamax -2.5",
+            min_value=0.0,
+            max_value=20.0,
+            step=0.01,
+            format="%.2f",
+            key="goal_cuota_u25_input",
+        )
+        g_nota = co3.text_input("Nota rápida (opcional)", key="goal_nota_input")
 
     with st.expander("Ajustes avanzados del modelo"):
         gp1, gp2 = st.columns(2)
@@ -2334,8 +2346,11 @@ with tab_poisson:
                     "res": res_g,
                     "last_n": max(len(pares_loc), len(pares_vis)),
                     "nota": g_nota,
-                    "cuota_winamax": float(
-                        st.session_state.get("goal_cuota_winamax_input", 0.0) or 0.0
+                    "cuota_o25": float(
+                        st.session_state.get("goal_cuota_o25_input", 0.0) or 0.0
+                    ),
+                    "cuota_u25": float(
+                        st.session_state.get("goal_cuota_u25_input", 0.0) or 0.0
                     ),
                     "home_fallback": g_home_input or "Local",
                     "away_fallback": g_away_input or "Visitante",
@@ -2355,8 +2370,12 @@ with tab_poisson:
         hs = res_g["home_stats"]
         aws = res_g["away_stats"]
         umbral_p_act = float(ultimo_g.get("umbral_poisson", UMBRAL_POISSON_POR_DEFECTO))
-        cuota_w_act = float(
-            st.session_state.get("goal_cuota_winamax_input", ultimo_g.get("cuota_winamax", 0.0))
+        cuota_o25_act = float(
+            st.session_state.get("goal_cuota_o25_input", ultimo_g.get("cuota_o25", 0.0))
+            or 0.0
+        )
+        cuota_u25_act = float(
+            st.session_state.get("goal_cuota_u25_input", ultimo_g.get("cuota_u25", 0.0))
             or 0.0
         )
 
@@ -2438,8 +2457,14 @@ with tab_poisson:
         cuota_justa_val = pron.get("cuota_justa")
         under_marcador_val = ex.get("under_marcador", "-")
 
-        ev_info = evaluar_ev_cuota(prob_raw_val if pron.get("apostar") else None, cuota_w_act)
-        cuota_winamax_txt = f"{cuota_w_act:.2f}" if cuota_w_act > 1.0 else "-"
+        cuota_pick_act = (
+            cuota_o25_act if pron.get("pick") == "OVER 2.5 GOLES" else cuota_u25_act
+        )
+        ev_info = evaluar_ev_cuota(
+            prob_raw_val if pron.get("apostar") else None, cuota_pick_act
+        )
+        cuota_o25_txt = f"{cuota_o25_act:.2f}" if cuota_o25_act > 1.0 else "-"
+        cuota_u25_txt = f"{cuota_u25_act:.2f}" if cuota_u25_act > 1.0 else "-"
         cuota_justa_txt = f"{float(cuota_justa_val):.2f}" if cuota_justa_val else "-"
         ev_txt = (
             f"{ev_info['ev_pct']:+.1f}%"
@@ -2480,7 +2505,7 @@ with tab_poisson:
         if pron.get("apostar"):
             if ev_info["tiene_cuota"]:
                 ev_c1, ev_c2, ev_c3 = st.columns(3)
-                ev_c1.metric("Cuota Winamax", f"{ev_info['cuota_winamax']:.2f}")
+                ev_c1.metric(f"Cuota Winamax ({pron['pick']})", f"{ev_info['cuota_winamax']:.2f}")
                 ev_c2.metric("Cuota justa Poisson", cuota_justa_txt)
                 ev_c3.metric("Esperanza (EV)", ev_txt, ev_info["etiqueta"])
                 if ev_info["es_ev_positivo"]:
@@ -2493,7 +2518,7 @@ with tab_poisson:
                     )
             else:
                 st.caption(
-                    f"💡 Introduce la **Cuota Winamax** arriba para comparar frente a la cuota justa de Poisson (`{cuota_justa_txt}`) y calcular el **+EV**."
+                    f"💡 Introduce la cuota de **+2.5** o **-2.5** arriba para comparar frente a la cuota justa de Poisson (`{cuota_justa_txt}`) y calcular el **+EV**."
                 )
 
         if st.button("Guardar en registro", key="btn_save_goal_log", width="stretch"):
@@ -2503,14 +2528,15 @@ with tab_poisson:
                 last_n=ultimo_g["last_n"],
                 m=mg,
                 cuota_x=0.0,
-                cuota_o25=0.0,
-                cuota_u25=0.0,
+                cuota_o25=cuota_o25_act,
+                cuota_u25=cuota_u25_act,
                 pronostico_txt=pron.get("pick", "NO APOSTAR"),
                 exacto_txt=exacto_recomendado_txt,
                 nota=ultimo_g["nota"],
                 pais_local=pais_loc_res,
                 pais_visitante=pais_vis_res,
-                cuota_winamax_txt=cuota_winamax_txt,
+                cuota_o25_txt=cuota_o25_txt,
+                cuota_u25_txt=cuota_u25_txt,
                 cuota_justa_txt=cuota_justa_txt,
                 ev_txt=ev_txt,
                 valor_txt=valor_txt,
