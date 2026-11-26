@@ -963,6 +963,34 @@ def ejecutar_ocr_bytes(img_bytes: bytes, psm: int = 11) -> str:
     return pytesseract.image_to_string(procesada, lang="spa+eng", config=config)
 
 
+@st.cache_data(show_spinner=False)
+def ejecutar_ocr_digitos_columna(img_bytes: bytes, psm: int = 6) -> str:
+    imagen = Image.open(BytesIO(img_bytes)).convert("RGB")
+    w, h = imagen.size
+
+    # Franja derecha donde suelen ir los goles apilados antes del badge G/P/E
+    x_ini = int(w * 0.62)
+    x_fin = int(w * 0.92)
+    y_ini = int(h * 0.08)
+    y_fin = int(h * 0.98)
+
+    recorte = imagen.crop((x_ini, y_ini, x_fin, y_fin))
+    rw, rh = recorte.size
+    if max(rw, rh) < 1600:
+        escala = 1600 / max(rw, rh)
+        recorte = recorte.resize(
+            (max(1, int(rw * escala)), max(1, int(rh * escala))),
+            Image.Resampling.LANCZOS,
+        )
+
+    gris = ImageOps.grayscale(recorte)
+    gris = ImageEnhance.Contrast(gris).enhance(1.8)
+    gris = ImageEnhance.Sharpness(gris).enhance(1.6)
+
+    config = f"--oem 3 --psm {psm} -c tessedit_char_whitelist=0123456789"
+    return pytesseract.image_to_string(gris, config=config)
+
+
 def _linea_es_fecha_o_hora(linea: str) -> bool:
     if re.search(r"\b\d{1,2}:\d{2}\b", linea):
         return True
@@ -981,14 +1009,8 @@ def _linea_es_competicion_o_resultado(linea: str) -> bool:
 
 
 def extraer_marcadores_ocr(texto_ocr: str, max_partidos: int = 10) -> list[tuple[int, int]]:
-    """
-    Extrae pares de goles (goles_1, goles_2) desde el texto OCR de un historial de partidos.
-    Soporta tanto marcadores en la misma línea ('1 - 2', '1-0') como dígitos apilados en vertical
-    ('1' encima de '2' en filas/líneas sucesivas).
-    """
     lineas = [l.strip() for l in (texto_ocr or "").splitlines() if l.strip()]
 
-    # 1. Intentar detectar pares en una misma línea (ej. 1-2, 0 - 0)
     pares_inline: list[tuple[int, int]] = []
     for linea in lineas:
         if _linea_es_fecha_o_hora(linea):
@@ -1000,15 +1022,12 @@ def extraer_marcadores_ocr(texto_ocr: str, max_partidos: int = 10) -> list[tuple
                 if len(pares_inline) >= max_partidos:
                     return pares_inline
 
-    # 2. Si hay dígitos sueltos apilados en vertical, recoger dígitos de líneas limpias
     digitos_sueltos: list[int] = []
     for linea in lineas:
         if _linea_es_fecha_o_hora(linea) or _linea_es_competicion_o_resultado(linea):
             continue
-        # Ignora líneas que parezcan nombres de equipos (tienen letras largas o '1913')
         if re.search(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]{3,}", linea):
             continue
-        # Solo líneas cortas con 1 dígito (goles apilados en columna)
         m_solitario = re.fullmatch(r"\D*(\d)\D*", linea)
         if m_solitario:
             val = int(m_solitario.group(1))
@@ -1026,20 +1045,37 @@ def extraer_marcadores_ocr(texto_ocr: str, max_partidos: int = 10) -> list[tuple
     return pares_inline
 
 
-def extraer_marcadores_desde_imagen(img_bytes: bytes, psm_preferido: int = 11) -> tuple[str, list[tuple[int, int]]]:
-    """Ejecuta OCR y devuelve (texto_ocr, marcadores), probando PSM 6 como respaldo si faltan partidos."""
+def extraer_marcadores_desde_imagen(
+    img_bytes: bytes, psm_preferido: int = 11
+) -> tuple[str, list[tuple[int, int]]]:
     texto = ejecutar_ocr_bytes(img_bytes, psm=psm_preferido)
     pares = extraer_marcadores_ocr(texto, max_partidos=10)
+
+    if len(pares) < 10:
+        for psm_col in (6, 4):
+            txt_col = ejecutar_ocr_digitos_columna(img_bytes, psm=psm_col)
+            digitos = [int(ch) for ch in re.findall(r"\d", txt_col or "") if int(ch) <= 9]
+            pares_col = [
+                (digitos[i], digitos[i + 1])
+                for i in range(0, len(digitos) - 1, 2)
+            ][:10]
+            if len(pares_col) > len(pares):
+                pares = pares_col
+                if txt_col.strip():
+                    texto = f"{texto}\n--- Columna goles (PSM {psm_col}) ---\n{txt_col}".strip()
+            if len(pares) >= 10:
+                break
+
     if len(pares) < 6 and psm_preferido != 6:
         texto_alt = ejecutar_ocr_bytes(img_bytes, psm=6)
         pares_alt = extraer_marcadores_ocr(texto_alt, max_partidos=10)
         if len(pares_alt) > len(pares):
             return texto_alt, pares_alt
+
     return texto, pares
 
 
 def parsear_marcadores_texto(texto_marcadores: str, max_partidos: int = 10) -> list[tuple[int, int]]:
-    """Convierte texto con marcadores (ej. '1-0, 2-1, 0-0') en tuplas (g1, g2)."""
     pares: list[tuple[int, int]] = []
     for match in re.finditer(r"(\d+)\s*[-–—:/]\s*(\d+)", texto_marcadores or ""):
         g1 = int(match.group(1))
@@ -1056,7 +1092,6 @@ def construir_stats_desde_marcadores(
     equipo_nombre: str,
     es_local_en_proximo: bool = True,
 ) -> dict:
-    """Construye la estructura de estadísticas de últimos N partidos a partir de marcadores leídos/editados."""
     n = len(marcadores)
     if n == 0:
         return {
