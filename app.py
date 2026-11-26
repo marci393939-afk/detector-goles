@@ -58,6 +58,16 @@ PAISES_BASE_INICIALES = {
     "gori": "Georgia",
     "walter ferretti": "Nicaragua",
     "sport sebaco": "Nicaragua",
+    "muang loei": "Tailandia",
+    "nong bua pitchaya": "Tailandia",
+    "kasetsart": "Tailandia",
+    "khonkaen utd": "Tailandia",
+    "khon kaen united": "Tailandia",
+    "nakhon ratchasima": "Tailandia",
+    "nakhon ratchasima fc": "Tailandia",
+    "songkhla": "Tailandia",
+    "police tero": "Tailandia",
+    "sukhothai": "Tailandia",
 }
 
 PAISES_OCR_MAPA = {
@@ -65,6 +75,8 @@ PAISES_OCR_MAPA = {
     "KENYA": "Kenia",
     "GEORGIA": "Georgia",
     "NICARAGUA": "Nicaragua",
+    "TAILANDIA": "Tailandia",
+    "THAILAND": "Tailandia",
     "ESPANA": "España",
     "ESPAÑA": "España",
     "SPAIN": "España",
@@ -1131,27 +1143,32 @@ def ejecutar_ocr_bytes(img_bytes: bytes, psm: int = 11) -> str:
 
 
 @st.cache_data(show_spinner=False)
-def ejecutar_ocr_digitos_columna(img_bytes: bytes, psm: int = 6) -> str:
+def ejecutar_ocr_digitos_columna(
+    img_bytes: bytes, psm: int = 6, umbral_binario: int | None = None
+) -> str:
     imagen = Image.open(BytesIO(img_bytes)).convert("RGB")
     w, h = imagen.size
 
-    x_ini = int(w * 0.62)
-    x_fin = int(w * 0.92)
-    y_ini = int(h * 0.08)
-    y_fin = int(h * 0.98)
+    x_ini = int(w * 0.70)
+    x_fin = int(w * 0.99)
+    y_ini = int(h * 0.10)
+    y_fin = int(h * 0.99)
 
     recorte = imagen.crop((x_ini, y_ini, x_fin, y_fin))
     rw, rh = recorte.size
-    if max(rw, rh) < 1600:
-        escala = 1600 / max(rw, rh)
+    if max(rw, rh) < 2000:
+        escala = 2000 / max(rw, rh)
         recorte = recorte.resize(
             (max(1, int(rw * escala)), max(1, int(rh * escala))),
             Image.Resampling.LANCZOS,
         )
 
     gris = ImageOps.grayscale(recorte)
-    gris = ImageEnhance.Contrast(gris).enhance(1.8)
-    gris = ImageEnhance.Sharpness(gris).enhance(1.6)
+    gris = ImageEnhance.Contrast(gris).enhance(1.9)
+    gris = ImageEnhance.Sharpness(gris).enhance(1.7)
+
+    if umbral_binario is not None:
+        gris = gris.point(lambda p: 255 if p > umbral_binario else 0)
 
     config = f"--oem 3 --psm {psm} -c tessedit_char_whitelist=0123456789"
     return pytesseract.image_to_string(gris, config=config)
@@ -1219,16 +1236,22 @@ def extraer_marcadores_desde_imagen(
 
     if len(pares) < 10:
         for psm_col in (6, 4):
-            txt_col = ejecutar_ocr_digitos_columna(img_bytes, psm=psm_col)
-            digitos = [int(ch) for ch in re.findall(r"\d", txt_col or "") if int(ch) <= 9]
-            pares_col = [
-                (digitos[i], digitos[i + 1])
-                for i in range(0, len(digitos) - 1, 2)
-            ][:10]
-            if len(pares_col) > len(pares):
-                pares = pares_col
-                if txt_col.strip():
-                    texto = f"{texto}\n--- Columna goles (PSM {psm_col}) ---\n{txt_col}".strip()
+            for umbral in (None, 185):
+                txt_col = ejecutar_ocr_digitos_columna(
+                    img_bytes, psm=psm_col, umbral_binario=umbral
+                )
+                digitos = [int(ch) for ch in re.findall(r"\d", txt_col or "") if int(ch) <= 9]
+                pares_col = [
+                    (digitos[i], digitos[i + 1])
+                    for i in range(0, len(digitos) - 1, 2)
+                ][:10]
+                if len(pares_col) > len(pares):
+                    pares = pares_col
+                    if txt_col.strip():
+                        etq_u = f"umbral={umbral}" if umbral is not None else "gris"
+                        texto = f"{texto}\n--- Columna goles (PSM {psm_col}, {etq_u}) ---\n{txt_col}".strip()
+                if len(pares) >= 10:
+                    break
             if len(pares) >= 10:
                 break
 
