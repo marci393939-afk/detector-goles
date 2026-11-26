@@ -71,6 +71,8 @@ PAISES_BASE_INICIALES = {
     "sukhothai": "Tailandia",
     "al nasr": "Egipto",
     "tersana": "Egipto",
+    "svay rieng": "Camboya",
+    "machida": "Japón",
 }
 
 PAISES_OCR_MAPA = {
@@ -120,6 +122,7 @@ PAISES_OCR_MAPA = {
     "FINLANDIA": "Finlandia",
     "JAPON": "Japón",
     "JAPÓN": "Japón",
+    "JPN": "Japón",
     "COREA DEL SUR": "Corea del Sur",
     "MARRUECOS": "Marruecos",
     "SUDAFRICA": "Sudáfrica",
@@ -130,11 +133,9 @@ PAISES_OCR_MAPA = {
     "UGANDA": "Uganda",
     "ETIOPIA": "Etiopía",
     "ETIOPÍA": "Etiopía",
-}
-
-QUICK_PRESETS_GOAL = {
-    "Personalizado": ("", "", ""),
-    "Walter Ferretti vs Sport Sébaco": ("Walter Ferretti", "Sport Sébaco", "Nicaragua"),
+    "CAMBOYA": "Camboya",
+    "CAMBODIA": "Camboya",
+    "CAM": "Camboya",
 }
 
 KNOWN_GOAL_TEAMS = {
@@ -303,6 +304,7 @@ def normalizar_texto(texto: str) -> str:
 def _clave_equipo_cache(nombre: str) -> str:
     norm = normalizar_texto(nombre)
     norm = re.sub(r"['’`]", "", norm)
+    norm = re.sub(r"\([a-z]{2,4}\)", "", norm)
     norm = re.sub(r"^(?:fc|cf|cd|ud|rcd|ca|ac|as|sc|ss|us|fk|sk|afc)\s+", "", norm)
     norm = re.sub(r"\s+(?:fc|cf|sad|sc|fk|sk|afc)$", "", norm)
     return norm.strip()
@@ -1113,11 +1115,15 @@ def registrar_analisis_goal(
     pronostico_txt: str,
     exacto_txt: str = "-",
     nota: str = "",
+    pais_local: str = "",
+    pais_visitante: str = "",
 ) -> None:
     st.session_state["analisis_log"].append(
         {
             "Local": home_name,
+            "País Local": pais_local.strip() or "-",
             "Visitante": away_name,
+            "País Visitante": pais_visitante.strip() or "-",
             "Pronóstico": pronostico_txt,
             "Exacto (-2.5)": exacto_txt,
             "Resultado exacto": m["exact_score"],
@@ -1738,6 +1744,9 @@ for clave, valor_ini in {
     "ultimo_goal_analisis": None,
     "goal_home_input": "",
     "goal_away_input": "",
+    "goal_pais_comun_input": "",
+    "goal_home_country_input": "",
+    "goal_away_country_input": "",
     "goal_country_input": "",
     "goal_nota_input": "",
     "pais_ocr_detectado": "",
@@ -1748,6 +1757,8 @@ for clave, valor_ini in {
     "marcadores_local_10_txt": "",
     "marcadores_vis_10_txt": "",
     "lote_partidos_texto": "",
+    "det_pais_local_input": "",
+    "det_pais_vis_input": "",
     "uploader_reset_id": 0,
     "cache_paises_equipos": cargar_cache_paises(),
 }.items():
@@ -1759,6 +1770,9 @@ def _limpiar_partido_goal() -> None:
     st.session_state["uploader_reset_id"] = int(st.session_state.get("uploader_reset_id", 0)) + 1
     st.session_state["goal_home_input"] = ""
     st.session_state["goal_away_input"] = ""
+    st.session_state["goal_pais_comun_input"] = ""
+    st.session_state["goal_home_country_input"] = ""
+    st.session_state["goal_away_country_input"] = ""
     st.session_state["goal_country_input"] = ""
     st.session_state["goal_nota_input"] = ""
     st.session_state["pais_ocr_detectado"] = ""
@@ -1771,6 +1785,8 @@ def _limpiar_partido_goal() -> None:
     st.session_state["ultimo_auto_fetch"] = None
     st.session_state["equipo_local_input"] = ""
     st.session_state["equipo_visitante_input"] = ""
+    st.session_state["det_pais_local_input"] = ""
+    st.session_state["det_pais_vis_input"] = ""
     st.session_state["api_info_msg"] = ""
     st.session_state["api_warn_msg"] = ""
     st.session_state["gf_local_10"] = 1.40
@@ -1791,22 +1807,29 @@ def _calcular_desde_capturas_3(
     league_avg_per_side: float,
     auto_league_avg: bool,
     max_lambda: float,
+    pais_comun_manual: str = "",
+    pais_local_manual: str = "",
+    pais_vis_manual: str = "",
     pais_ocr_hint: str = "",
 ) -> dict:
     loc_limpio = (home_nombre or "Local").strip() or "Local"
     vis_limpio = (away_nombre or "Visitante").strip() or "Visitante"
     mismo_equipo = normalizar_texto(loc_limpio) == normalizar_texto(vis_limpio)
 
-    pais_loc = consultar_pais_equipo(loc_limpio)
-    pais_vis = consultar_pais_equipo(vis_limpio)
+    comun_limpio = (pais_comun_manual or "").strip()
+    pais_loc = (pais_local_manual or "").strip() or comun_limpio or consultar_pais_equipo(loc_limpio)
+    pais_vis = (pais_vis_manual or "").strip() or comun_limpio or consultar_pais_equipo(vis_limpio)
 
     if pais_ocr_hint:
         if not pais_loc:
             pais_loc = pais_ocr_hint
-            guardar_equipo_pais(loc_limpio, pais_ocr_hint)
         if not pais_vis:
             pais_vis = pais_ocr_hint
-            guardar_equipo_pais(vis_limpio, pais_ocr_hint)
+
+    if pais_loc:
+        guardar_equipo_pais(loc_limpio, pais_loc)
+    if pais_vis:
+        guardar_equipo_pais(vis_limpio, pais_vis)
 
     hs = construir_stats_desde_marcadores(marcadores_l, loc_limpio, es_local_en_proximo=True)
     aws = construir_stats_desde_marcadores(marcadores_v, vis_limpio, es_local_en_proximo=False)
@@ -1915,10 +1938,17 @@ with tab_poisson:
                     st.session_state["goal_away_input"] = vis_ocr
                 if pais_p:
                     st.session_state["pais_ocr_detectado"] = pais_p
+                    st.session_state["goal_pais_comun_input"] = pais_p
                     if loc_ocr:
                         guardar_equipo_pais(loc_ocr, pais_p)
                     if vis_ocr:
                         guardar_equipo_pais(vis_ocr, pais_p)
+                pais_l_cache = consultar_pais_equipo(loc_ocr) or pais_p
+                pais_v_cache = consultar_pais_equipo(vis_ocr) or pais_p
+                if pais_l_cache:
+                    st.session_state["goal_home_country_input"] = pais_l_cache
+                if pais_v_cache:
+                    st.session_state["goal_away_country_input"] = pais_v_cache
                 st.session_state["ultimo_ocr_partido_file"] = marca_p
             with st.expander("Ver texto OCR — Captura 1 (Partido)"):
                 st.text(txt_p if txt_p.strip() else "No se detectó texto.")
@@ -1929,8 +1959,76 @@ with tab_poisson:
     g_home_input = gc1.text_input("Equipo Local", key="goal_home_input")
     g_away_input = gc2.text_input("Equipo Visitante", key="goal_away_input")
 
-    pais_l_preview = consultar_pais_equipo(g_home_input)
-    pais_v_preview = consultar_pais_equipo(g_away_input)
+    if g_home_input.strip() and not st.session_state.get("goal_home_country_input", "").strip():
+        pais_auto_l = consultar_pais_equipo(g_home_input)
+        if pais_auto_l:
+            st.session_state["goal_home_country_input"] = pais_auto_l
+    if g_away_input.strip() and not st.session_state.get("goal_away_country_input", "").strip():
+        pais_auto_v = consultar_pais_equipo(g_away_input)
+        if pais_auto_v:
+            st.session_state["goal_away_country_input"] = pais_auto_v
+
+    with st.container(border=True):
+        st.markdown("**🌍 País de los equipos de la captura**")
+        g_pais_comun = st.text_input(
+            "País común (si ambos juegan en el mismo país)",
+            placeholder="Ej.: Egipto, España, Kenia, Nicaragua...",
+            key="goal_pais_comun_input",
+        )
+        pc1, pc2 = st.columns(2)
+        g_home_country = pc1.text_input(
+            "País del Equipo Local",
+            placeholder="Ej.: Egipto",
+            key="goal_home_country_input",
+        )
+        g_away_country = pc2.text_input(
+            "País del Equipo Visitante",
+            placeholder="Ej.: Egipto",
+            key="goal_away_country_input",
+        )
+
+        pb1, pb2 = st.columns(2)
+        if pb1.button("📋 Aplicar país común a ambos", key="btn_apply_common_country", width="stretch"):
+            pais_ref = (g_pais_comun or g_home_country or g_away_country).strip()
+            if pais_ref:
+                st.session_state["goal_pais_comun_input"] = pais_ref
+                st.session_state["goal_home_country_input"] = pais_ref
+                st.session_state["goal_away_country_input"] = pais_ref
+                if g_home_input.strip():
+                    guardar_equipo_pais(g_home_input, pais_ref)
+                if g_away_input.strip():
+                    guardar_equipo_pais(g_away_input, pais_ref)
+                st.rerun()
+            else:
+                st.warning("Escribe un país antes de aplicarlo.")
+
+        if pb2.button("💾 Guardar país en memoria local", key="btn_save_countries_main", width="stretch"):
+            pais_l_save = (g_home_country or g_pais_comun).strip()
+            pais_v_save = (g_away_country or g_pais_comun).strip()
+            guardado = False
+            if g_home_input.strip() and pais_l_save:
+                guardar_equipo_pais(g_home_input, pais_l_save)
+                st.session_state["goal_home_country_input"] = pais_l_save
+                guardado = True
+            if g_away_input.strip() and pais_v_save:
+                guardar_equipo_pais(g_away_input, pais_v_save)
+                st.session_state["goal_away_country_input"] = pais_v_save
+                guardado = True
+            if guardado:
+                st.success("País guardado correctamente para los equipos de la captura.")
+            else:
+                st.warning("Introduce al menos un equipo y su país para guardarlo.")
+
+    pais_l_preview = (
+        g_home_country.strip()
+        or g_pais_comun.strip()
+        or consultar_pais_equipo(g_home_input)
+    )
+    pais_v_preview = (
+        g_away_country.strip()
+        or g_pais_comun.strip()
+        or consultar_pais_equipo(g_away_input)
+    )
     if g_home_input.strip() or g_away_input.strip():
         etq_l = f"**{g_home_input or 'Local'}** (`{pais_l_preview or 'Sin país'}`)"
         etq_v = f"**{g_away_input or 'Visitante'}** (`{pais_v_preview or 'Sin país'}`)"
@@ -1939,9 +2037,9 @@ with tab_poisson:
             and pais_v_preview
             and normalizar_texto(pais_l_preview) == normalizar_texto(pais_v_preview)
         ):
-            st.caption(f"🌍 Verificación previa: {etq_l} vs {etq_v} · ✅ Ambos de **{pais_l_preview}**")
+            st.caption(f"🌍 Verificación: {etq_l} vs {etq_v} · ✅ Ambos de **{pais_l_preview}**")
         else:
-            st.caption(f"🌍 Verificación previa: {etq_l} vs {etq_v}")
+            st.caption(f"🌍 Verificación: {etq_l} vs {etq_v}")
 
     st.markdown("**Paso 2 · Captura de los últimos 10 partidos del Equipo Local**")
     archivo_local_10 = st.file_uploader(
@@ -1962,6 +2060,8 @@ with tab_poisson:
             pais_l_ocr = detectar_pais_en_ocr(txt_l)
             if pais_l_ocr and g_home_input.strip():
                 guardar_equipo_pais(g_home_input, pais_l_ocr)
+                if not st.session_state.get("goal_home_country_input", "").strip():
+                    st.session_state["goal_home_country_input"] = pais_l_ocr
             marca_l = f"{archivo_local_10.file_id}_{psm_goal}"
             if st.session_state.get("ultimo_ocr_local_10_file") != marca_l:
                 st.session_state["marcadores_local_10_txt"] = ", ".join(
@@ -1998,6 +2098,8 @@ with tab_poisson:
             pais_v_ocr = detectar_pais_en_ocr(txt_v)
             if pais_v_ocr and g_away_input.strip():
                 guardar_equipo_pais(g_away_input, pais_v_ocr)
+                if not st.session_state.get("goal_away_country_input", "").strip():
+                    st.session_state["goal_away_country_input"] = pais_v_ocr
             marca_v = f"{archivo_vis_10.file_id}_{psm_goal}"
             if st.session_state.get("ultimo_ocr_vis_10_file") != marca_v:
                 st.session_state["marcadores_vis_10_txt"] = ", ".join(
@@ -2067,6 +2169,9 @@ with tab_poisson:
                     league_avg_per_side=g_league_avg,
                     auto_league_avg=g_auto_league,
                     max_lambda=g_max_lambda,
+                    pais_comun_manual=g_pais_comun,
+                    pais_local_manual=g_home_country,
+                    pais_vis_manual=g_away_country,
                     pais_ocr_hint=st.session_state.get("pais_ocr_detectado", ""),
                 )
                 st.session_state["ultimo_goal_analisis"] = {
@@ -2107,8 +2212,12 @@ with tab_poisson:
         for aviso in res_g.get("warnings", []):
             st.warning(f"⚠️ {aviso}")
 
-        pais_loc_res = (ht.get("country") or "").strip()
-        pais_vis_res = (at.get("country") or "").strip()
+        pais_loc_res = (
+            g_home_country.strip() or g_pais_comun.strip() or ht.get("country") or ""
+        ).strip()
+        pais_vis_res = (
+            g_away_country.strip() or g_pais_comun.strip() or at.get("country") or ""
+        ).strip()
         etq_pais_l = pais_loc_res if pais_loc_res else "País sin confirmar"
         etq_pais_v = pais_vis_res if pais_vis_res else "País sin confirmar"
 
@@ -2121,7 +2230,7 @@ with tab_poisson:
         elif pais_loc_res and pais_vis_res:
             estado_pais_txt = f"⚠️ Países distintos (`{pais_loc_res}` vs `{pais_vis_res}`)"
         else:
-            estado_pais_txt = "⚠️ País pendiente de confirmar en caché local"
+            estado_pais_txt = "⚠️ País pendiente de confirmar"
 
         st.caption(
             f"Partido: **{ht.get('name')}** ({etq_pais_l}) vs **{at.get('name')}** ({etq_pais_v}) · "
@@ -2129,32 +2238,6 @@ with tab_poisson:
             f"Partidos analizados: `{hs['count']}` (Local) / `{aws['count']}` (Visitante) · "
             f"Media goles/equipo aplicada: `{res_g.get('base_used', 1.30)}`"
         )
-
-        if (
-            not pais_loc_res
-            or not pais_vis_res
-            or normalizar_texto(pais_loc_res) != normalizar_texto(pais_vis_res)
-        ):
-            with st.expander("Guardar / corregir país de estos equipos en memoria local"):
-                cp1, cp2, cp3 = st.columns([2, 2, 1.2])
-                nuevo_p_l = cp1.text_input(
-                    f"País {ht.get('name')}",
-                    value=pais_loc_res,
-                    key="edit_pais_loc_cache",
-                )
-                nuevo_p_v = cp2.text_input(
-                    f"País {at.get('name')}",
-                    value=pais_vis_res or nuevo_p_l,
-                    key="edit_pais_vis_cache",
-                )
-                if cp3.button("Guardar país", key="btn_save_pais_cache", width="stretch"):
-                    if nuevo_p_l.strip():
-                        guardar_equipo_pais(ht.get("name", ""), nuevo_p_l.strip())
-                        res_g["home_team"]["country"] = nuevo_p_l.strip()
-                    if nuevo_p_v.strip():
-                        guardar_equipo_pais(at.get("name", ""), nuevo_p_v.strip())
-                        res_g["away_team"]["country"] = nuevo_p_v.strip()
-                    st.rerun()
 
         st.info(
             f"**Trayectoria en últimos partidos:** "
@@ -2220,6 +2303,8 @@ with tab_poisson:
                 pronostico_txt=pron.get("pick", "NO APOSTAR"),
                 exacto_txt=exacto_recomendado_txt,
                 nota=ultimo_g["nota"],
+                pais_local=pais_loc_res,
+                pais_visitante=pais_vis_res,
             )
             st.success("Análisis guardado en la pestaña 'Registro de análisis'.")
 
@@ -2355,22 +2440,48 @@ with tab_detector:
         try:
             texto_ocr = ejecutar_ocr_bytes(img_bytes, psm=psm)
             local_sugerido, visitante_sugerido = sugerir_equipos_candidatos(texto_ocr)
+            pais_det = detectar_pais_en_ocr(texto_ocr)
+            if local_sugerido and not st.session_state.get("det_pais_local_input", "").strip():
+                st.session_state["det_pais_local_input"] = (
+                    consultar_pais_equipo(local_sugerido) or pais_det
+                )
+            if visitante_sugerido and not st.session_state.get("det_pais_vis_input", "").strip():
+                st.session_state["det_pais_vis_input"] = (
+                    consultar_pais_equipo(visitante_sugerido) or pais_det
+                )
         except Exception as exc:
             st.error(f"Error al ejecutar OCR: {exc}")
 
         with st.expander("Ver texto detectado automáticamente en la captura"):
             st.text(texto_ocr if texto_ocr.strip() else "No se detectó texto.")
 
-    st.subheader("2. Partido (sin depender de cuotas)")
+    st.subheader("2. Partido y país de los equipos")
     col1, col2 = st.columns(2)
     with col1:
         equipo_local = st.text_input(
             "Equipo Local", value=local_sugerido, key="equipo_local_input"
         )
+        det_pais_local = st.text_input(
+            "País Local",
+            placeholder="Ej.: España, Egipto...",
+            key="det_pais_local_input",
+        )
     with col2:
         equipo_visitante = st.text_input(
             "Equipo Visitante", value=visitante_sugerido, key="equipo_visitante_input"
         )
+        det_pais_vis = st.text_input(
+            "País Visitante",
+            placeholder="Ej.: España, Egipto...",
+            key="det_pais_vis_input",
+        )
+
+    if st.button("💾 Guardar país de estos equipos", key="btn_save_det_countries"):
+        if equipo_local.strip() and det_pais_local.strip():
+            guardar_equipo_pais(equipo_local, det_pais_local)
+        if equipo_visitante.strip() and det_pais_vis.strip():
+            guardar_equipo_pais(equipo_visitante, det_pais_vis)
+        st.success("Países guardados en memoria local.")
 
     api_key_activa = obtener_api_key(api_key_input)
 
@@ -2416,6 +2527,13 @@ with tab_detector:
             st.session_state["gc_vis_10"] = float(stats_v["gc_prom"])
             st.session_state["under25_local_10"] = float(stats_l["under25_rate"])
             st.session_state["under25_vis_10"] = float(stats_v["under25_rate"])
+
+            if team_l.get("country"):
+                guardar_equipo_pais(team_l["name"], team_l["country"])
+                st.session_state["det_pais_local_input"] = team_l["country"]
+            if team_v.get("country"):
+                guardar_equipo_pais(team_v["name"], team_v["country"])
+                st.session_state["det_pais_vis_input"] = team_v["country"]
 
             h2h = obtener_h2h_api(team_l["id"], team_v["id"], key)
             if h2h and h2h["partidos"] >= 2:
@@ -2541,7 +2659,9 @@ with tab_detector:
         umbral_racha=UMBRAL_RACHA_POR_DEFECTO,
     )
 
-    partido_label = f"{equipo_local or 'Local'} vs {equipo_visitante or 'Visitante'}"
+    p_l_lbl = f" ({det_pais_local.strip()})" if det_pais_local.strip() else ""
+    p_v_lbl = f" ({det_pais_vis.strip()})" if det_pais_vis.strip() else ""
+    partido_label = f"{equipo_local or 'Local'}{p_l_lbl} vs {equipo_visitante or 'Visitante'}{p_v_lbl}"
 
     st.divider()
     st.subheader("4. Análisis del modelo")
