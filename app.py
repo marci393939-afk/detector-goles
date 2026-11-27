@@ -429,6 +429,15 @@ def evaluar_ev_cuota(prob_raw: float | None, cuota_winamax: float | None) -> dic
     }
 
 
+def _formatear_marcadores_top(items: list[dict], limite: int = 3) -> str:
+    partes = []
+    for item in (items or [])[:limite]:
+        cj = item.get("cuota_justa")
+        cj_txt = f" · cj {float(cj):.2f}" if cj else ""
+        partes.append(f"`{item['marcador']}` ({item['prob']:.1f}%{cj_txt})")
+    return " | ".join(partes)
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def api_get(endpoint: str, params_items: tuple[tuple[str, str], ...], api_key: str) -> dict:
     headers = {"x-apisports-key": api_key}
@@ -805,7 +814,7 @@ def calculate_poisson_markets(
     prob_over_25 = 0.0
 
     rho = -0.07
-    cell_probs: list[tuple[str, float]] = []
+    cell_probs: list[tuple[str, float, int]] = []
     raw_matrix: list[list[float]] = []
     total_mass = 0.0
 
@@ -831,6 +840,7 @@ def calculate_poisson_markets(
 
     matrix: list[list[float]] = []
     under_scores: list[tuple[str, float]] = []
+    over_scores: list[tuple[str, float]] = []
 
     for h in range(max_goals + 1):
         norm_row = []
@@ -838,7 +848,7 @@ def calculate_poisson_markets(
             p_cell = raw_matrix[h][a] / total_mass if total_mass > 0 else raw_matrix[h][a]
             norm_row.append(p_cell)
             etiqueta = f"{h} - {a}"
-            cell_probs.append((etiqueta, p_cell))
+            cell_probs.append((etiqueta, p_cell, h + a))
 
             if h > a:
                 prob_home += p_cell
@@ -849,6 +859,7 @@ def calculate_poisson_markets(
 
             if (h + a) >= 3:
                 prob_over_25 += p_cell
+                over_scores.append((etiqueta, p_cell))
             else:
                 under_scores.append((etiqueta, p_cell))
         matrix.append(norm_row)
@@ -870,9 +881,9 @@ def calculate_poisson_markets(
             "prob": round(pr * 100, 1),
             "cuota_justa": fair_odd(pr),
         }
-        for sc, pr in top_scores_sorted
+        for sc, pr, _ in top_scores_sorted
     ]
-    best_score, best_prob = top_scores_sorted[0]
+    best_score, best_prob, _ = top_scores_sorted[0]
 
     under_scores_sorted = sorted(under_scores, key=lambda x: x[1], reverse=True)[:3]
     top_under_scores = [
@@ -887,6 +898,19 @@ def calculate_poisson_markets(
         under_scores_sorted[0] if under_scores_sorted else ("1 - 0", 0.0)
     )
 
+    over_scores_sorted = sorted(over_scores, key=lambda x: x[1], reverse=True)[:3]
+    top_over_scores = [
+        {
+            "marcador": sc,
+            "prob": round(pr * 100, 1),
+            "cuota_justa": fair_odd(pr),
+        }
+        for sc, pr in over_scores_sorted
+    ]
+    best_over_score, best_over_prob = (
+        over_scores_sorted[0] if over_scores_sorted else ("2 - 1", 0.0)
+    )
+
     return {
         "lam_home": round(lam_home, 3),
         "lam_away": round(lam_away, 3),
@@ -899,6 +923,10 @@ def calculate_poisson_markets(
         "under_exact_score_prob": round(max(0.0, best_under_prob) * 100, 1),
         "under_exact_score_fair_odd": fair_odd(max(0.0, best_under_prob)),
         "top_under_scores": top_under_scores,
+        "over_exact_score": best_over_score,
+        "over_exact_score_prob": round(max(0.0, best_over_prob) * 100, 1),
+        "over_exact_score_fair_odd": fair_odd(max(0.0, best_over_prob)),
+        "top_over_scores": top_over_scores,
         "prob_1": round(prob_home, 4),
         "prob_x": round(prob_draw, 4),
         "prob_2": round(prob_away, 4),
@@ -947,6 +975,10 @@ def seleccionar_pronostico_goal(
         "under_prob": markets.get("under_exact_score_prob", 0.0),
         "under_cuota_justa": markets.get("under_exact_score_fair_odd"),
         "under_top3": markets.get("top_under_scores", []),
+        "over_marcador": markets.get("over_exact_score", "2 - 1"),
+        "over_prob": markets.get("over_exact_score_prob", 0.0),
+        "over_cuota_justa": markets.get("over_exact_score_fair_odd"),
+        "over_top3": markets.get("top_over_scores", []),
         "exacto_activo": False,
     }
 
@@ -1015,7 +1047,7 @@ def seleccionar_pronostico_goal(
 
     if h_over >= umbral_racha and a_over >= umbral_racha:
         if prob_o25_pct >= umbral_poisson:
-            resultado_exacto["exacto_activo"] = False
+            resultado_exacto["exacto_activo"] = True
             return {
                 "apostar": True,
                 "senal_parcial": False,
@@ -1201,7 +1233,7 @@ def registrar_analisis_goal(
             "Cuota justa": cuota_justa_txt,
             "% EV": ev_txt,
             "Valor": valor_txt,
-            "Exacto (-2.5)": exacto_txt,
+            "Marcador exacto pick": exacto_txt,
             "Resultado exacto": m["exact_score"],
             "Prob. exacto (%)": m["exact_score_prob"],
             "Partidos (N)": last_n,
@@ -2390,12 +2422,9 @@ with tab_poisson:
             umbral_poisson=umbral_p_act,
         )
         ex = pron.get("resultado_exacto", {})
-        top3_txt = " | ".join(
-            f"`{item['marcador']}` ({item['prob']:.1f}%)" for item in ex.get("top3", [])
-        )
-        under_top3_txt = " | ".join(
-            f"`{item['marcador']}` ({item['prob']:.1f}%)" for item in ex.get("under_top3", [])
-        )
+        top3_txt = _formatear_marcadores_top(ex.get("top3", []), limite=3)
+        under_top3_txt = _formatear_marcadores_top(ex.get("under_top3", []), limite=3)
+        over_top3_txt = _formatear_marcadores_top(ex.get("over_top3", []), limite=3)
 
         for aviso in res_g.get("warnings", []):
             st.warning(f"⚠️ {aviso}")
@@ -2456,6 +2485,7 @@ with tab_poisson:
         prob_raw_val = float(pron.get("prob_raw", 0.0) or 0.0)
         cuota_justa_val = pron.get("cuota_justa")
         under_marcador_val = ex.get("under_marcador", "-")
+        over_marcador_val = ex.get("over_marcador", "-")
 
         cuota_pick_act = (
             cuota_o25_act if pron.get("pick") == "OVER 2.5 GOLES" else cuota_u25_act
@@ -2483,10 +2513,12 @@ with tab_poisson:
                 f"**Marcadores exactos (-2.5) más probables:** {under_top3_txt}"
             )
         elif pron.get("apostar") and pron.get("pick") == "OVER 2.5 GOLES":
+            exacto_recomendado_txt = over_marcador_val
             st.success(
-                f"### ✅ DOBLE CONFIRMACIÓN → {pron['pick']} (sin exacto; solo en -2.5 goles)\n"
+                f"### ✅ DOBLE CONFIRMACIÓN → {pron['pick']} | EXACTO (+2.5) → `{over_marcador_val}`\n"
                 f"**Racha ≥ {UMBRAL_RACHA_POR_DEFECTO:.0f}%:** Local `{r_home_val:.1f}%` · Visitante `{r_away_val:.1f}%` | "
                 f"**Poisson:** `{prob_val:.1f}%` (≥ {umbral_p_act:.0f}% · cuota justa `{cuota_justa_txt}`)\n\n"
+                f"**Marcadores exactos (+2.5) más probables:** {over_top3_txt}\n\n"
                 f"*Referencia general marcadores:* {top3_txt}"
             )
         elif pron.get("senal_parcial"):
@@ -2561,7 +2593,7 @@ with tab_poisson:
 with tab_lote:
     st.subheader("Evaluador rápido de varios partidos")
     st.caption(
-        "Pega un partido por línea (`Local vs Visitante`). Evalúa Racha ≥ 60 % + Poisson ≥ 58 % y muestra exacto solo en `-2.5 goles`."
+        "Pega un partido por línea (`Local vs Visitante`). Evalúa Racha ≥ 60 % + Poisson ≥ 58 % y muestra marcador exacto en señales confirmadas."
     )
     goal_key_manual = st.text_input(
         "GOAL_KEY (opcional si ya está en Secrets o entorno)",
@@ -2609,11 +2641,12 @@ with tab_lote:
                         umbral_poisson=UMBRAL_POISSON_POR_DEFECTO,
                     )
                     ex_p = sel_p.get("resultado_exacto", {})
-                    exacto_col = (
-                        ex_p.get("under_marcador", "-")
-                        if (sel_p.get("apostar") and sel_p.get("pick") == "UNDER 2.5 GOLES")
-                        else "-"
-                    )
+                    if sel_p.get("apostar") and sel_p.get("pick") == "UNDER 2.5 GOLES":
+                        exacto_col = ex_p.get("under_marcador", "-")
+                    elif sel_p.get("apostar") and sel_p.get("pick") == "OVER 2.5 GOLES":
+                        exacto_col = ex_p.get("over_marcador", "-")
+                    else:
+                        exacto_col = "-"
                     resumen_lote.append(
                         {
                             "Partido": f"{r_p['home_team'].get('name')} vs {r_p['away_team'].get('name')}",
@@ -2622,7 +2655,7 @@ with tab_lote:
                             "Poisson": f"{sel_p.get('prob_poisson', 0.0):.1f}%",
                             "Decisión": "✅ APOSTAR" if sel_p.get("apostar") else ("⚠️ Parcial" if sel_p.get("senal_parcial") else "⛔ NO"),
                             "Pick": sel_p.get("pick", "NO APOSTAR"),
-                            "Exacto (-2.5)": exacto_col,
+                            "Exacto pick": exacto_col,
                         }
                     )
                 except Exception as exc_l:
@@ -2634,7 +2667,7 @@ with tab_lote:
                             "Poisson": "-",
                             "Decisión": "⚠️ Error",
                             "Pick": str(exc_l),
-                            "Exacto (-2.5)": "-",
+                            "Exacto pick": "-",
                         }
                     )
             st.dataframe(pd.DataFrame(resumen_lote), width="stretch", hide_index=True)
