@@ -305,6 +305,21 @@ def normalizar_texto(texto: str) -> str:
     return re.sub(r"\s+", " ", sin_tildes).strip().lower()
 
 
+def _parsear_cuota_texto(valor: str | float | int | None) -> float:
+    if valor is None:
+        return 0.0
+    if isinstance(valor, (int, float)):
+        return float(valor)
+    limpio = str(valor).strip().replace(",", ".")
+    limpio = re.sub(r"[^0-9.]", "", limpio)
+    if not limpio:
+        return 0.0
+    try:
+        return float(limpio)
+    except ValueError:
+        return 0.0
+
+
 def _clave_equipo_cache(nombre: str) -> str:
     norm = normalizar_texto(nombre)
     norm = re.sub(r"['’`]", "", norm)
@@ -1886,8 +1901,8 @@ for clave, valor_ini in {
     "goal_away_country_input": "",
     "goal_country_input": "",
     "goal_nota_input": "",
-    "goal_cuota_o25_input": 0.0,
-    "goal_cuota_u25_input": 0.0,
+    "goal_cuota_o25_input": "",
+    "goal_cuota_u25_input": "",
     "pais_ocr_detectado": "",
     "pais_status_msg": "",
     "ultimo_ocr_partido_file": None,
@@ -1915,8 +1930,8 @@ def _limpiar_partido_goal() -> None:
     st.session_state["goal_away_country_input"] = ""
     st.session_state["goal_country_input"] = ""
     st.session_state["goal_nota_input"] = ""
-    st.session_state["goal_cuota_o25_input"] = 0.0
-    st.session_state["goal_cuota_u25_input"] = 0.0
+    st.session_state["goal_cuota_o25_input"] = ""
+    st.session_state["goal_cuota_u25_input"] = ""
     st.session_state["pais_ocr_detectado"] = ""
     st.session_state["pais_status_msg"] = ""
     st.session_state["marcadores_local_10_txt"] = ""
@@ -2293,23 +2308,20 @@ with tab_poisson:
     with st.container(border=True):
         st.markdown("**💶 Cuotas en Winamax (+2.5 / -2.5) y nota**")
         co1, co2, co3 = st.columns([1.0, 1.0, 1.8])
-        g_cuota_o25 = co1.number_input(
+        co1.text_input(
             "Cuota Winamax +2.5",
-            min_value=0.0,
-            max_value=20.0,
-            step=0.01,
-            format="%.2f",
+            placeholder="Ej.: 1.70",
             key="goal_cuota_o25_input",
         )
-        g_cuota_u25 = co2.number_input(
+        co2.text_input(
             "Cuota Winamax -2.5",
-            min_value=0.0,
-            max_value=20.0,
-            step=0.01,
-            format="%.2f",
+            placeholder="Ej.: 1.92",
             key="goal_cuota_u25_input",
         )
         g_nota = co3.text_input("Nota rápida (opcional)", key="goal_nota_input")
+
+    g_cuota_o25 = _parsear_cuota_texto(st.session_state.get("goal_cuota_o25_input", ""))
+    g_cuota_u25 = _parsear_cuota_texto(st.session_state.get("goal_cuota_u25_input", ""))
 
     with st.expander("Ajustes avanzados del modelo"):
         gp1, gp2 = st.columns(2)
@@ -2378,12 +2390,8 @@ with tab_poisson:
                     "res": res_g,
                     "last_n": max(len(pares_loc), len(pares_vis)),
                     "nota": g_nota,
-                    "cuota_o25": float(
-                        st.session_state.get("goal_cuota_o25_input", 0.0) or 0.0
-                    ),
-                    "cuota_u25": float(
-                        st.session_state.get("goal_cuota_u25_input", 0.0) or 0.0
-                    ),
+                    "cuota_o25": g_cuota_o25,
+                    "cuota_u25": g_cuota_u25,
                     "home_fallback": g_home_input or "Local",
                     "away_fallback": g_away_input or "Visitante",
                     "umbral_poisson": float(
@@ -2402,13 +2410,11 @@ with tab_poisson:
         hs = res_g["home_stats"]
         aws = res_g["away_stats"]
         umbral_p_act = float(ultimo_g.get("umbral_poisson", UMBRAL_POISSON_POR_DEFECTO))
-        cuota_o25_act = float(
-            st.session_state.get("goal_cuota_o25_input", ultimo_g.get("cuota_o25", 0.0))
-            or 0.0
+        cuota_o25_act = _parsear_cuota_texto(
+            st.session_state.get("goal_cuota_o25_input", ultimo_g.get("cuota_o25", ""))
         )
-        cuota_u25_act = float(
-            st.session_state.get("goal_cuota_u25_input", ultimo_g.get("cuota_u25", 0.0))
-            or 0.0
+        cuota_u25_act = _parsear_cuota_texto(
+            st.session_state.get("goal_cuota_u25_input", ultimo_g.get("cuota_u25", ""))
         )
 
         pron = seleccionar_pronostico_goal(
