@@ -104,6 +104,9 @@ PALABRAS_RUIDO = {
     "LOCAL",
     "VISITANTE",
     "PA",
+    "JM",
+    "MM",
+    "FM",
 }
 
 
@@ -129,11 +132,61 @@ def _parsear_cuota_texto(valor: str | float | int | None) -> float:
         return 0.0
 
 
+def _normalizar_gol_ocr(token: str) -> int | None:
+    t = token.strip()
+    if t in ("0", "()", "o", "O"):
+        return 0
+    if t in ("1", "2", "3", "4", "5", "6", "7", "8", "9"):
+        return int(t)
+    return None
+
+
 def _parsear_marcadores_texto(texto: str) -> list[tuple[int, int]]:
     if not texto or not texto.strip():
         return []
-    pares = re.findall(r"\b([0-9])\s*[-–:]\s*([0-9])\b", texto)
-    return [(int(a), int(b)) for a, b in pares if int(a) <= 9 and int(b) <= 9][:10]
+
+    # 1) Formato directo tipo "2-1" o "0 - 0"
+    pares_directos = re.findall(r"\b([0-9])\s*[-–:]\s*([0-9])\b", texto)
+    if pares_directos:
+        return [(int(a), int(b)) for a, b in pares_directos if int(a) <= 9 and int(b) <= 9][:10]
+
+    # 2) Formato Flashscore: líneas con gol al final o cero leído como "()" / "o"
+    goles_sueltos: list[int] = []
+    for linea in texto.splitlines():
+        limpia = linea.strip()
+        if not limpia:
+            continue
+        # Ignorar fechas tipo 25.11.26 y cabeceras
+        if re.search(r"\b\d{1,2}\.\d{1,2}\.\d{2,4}\b", limpia):
+            continue
+        if re.search(r"\bULTIMOS\s+PARTIDOS\b|\bÚLTIMOS\s+PARTIDOS\b", limpia, flags=re.IGNORECASE):
+            continue
+
+        # Si termina en () o similar tras un nombre de equipo
+        if re.search(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ\)\.]\s*(?:\(\)|\[\]|\{\}|o|O)\s*$", limpia):
+            goles_sueltos.append(0)
+            continue
+
+        # Buscar un dígito suelto al final de la línea
+        m = re.search(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ\)\.\]]\s+([0-9oO])\s*$", limpia)
+        if m:
+            gol = _normalizar_gol_ocr(m.group(1))
+            if gol is not None:
+                goles_sueltos.append(gol)
+                continue
+
+        # Línea formada solo por un dígito o cero leído como ()
+        if limpia in ("()", "o", "O"):
+            goles_sueltos.append(0)
+        elif re.fullmatch(r"[0-9]", limpia):
+            goles_sueltos.append(int(limpia))
+
+    pares: list[tuple[int, int]] = []
+    for i in range(0, len(goles_sueltos) - 1, 2):
+        pares.append((goles_sueltos[i], goles_sueltos[i + 1]))
+        if len(pares) >= 10:
+            break
+    return pares
 
 
 def _extraer_nombre_equipo_ocr(texto_ocr: str, fallback: str = "") -> str:
@@ -168,17 +221,17 @@ def _extraer_nombre_equipo_ocr(texto_ocr: str, fallback: str = "") -> str:
 
 def extraer_datos_desde_imagen(imagen: Image.Image) -> dict:
     w, h = imagen.size
-    escala = 2 if max(w, h) < 1300 else 1
+    escala = 2 if max(w, h) < 1400 else 1
     base = imagen.convert("RGB")
     if escala > 1:
         base = base.resize((w * escala, h * escala), Image.Resampling.LANCZOS)
 
     gris = ImageOps.grayscale(base)
     gris = ImageOps.autocontrast(gris)
-    gris = ImageEnhance.Contrast(gris).enhance(2.0)
+    gris = ImageEnhance.Contrast(gris).enhance(1.45)
 
     textos = []
-    for cfg in ("--psm 6", "--psm 4", "--psm 11"):
+    for cfg in ("--psm 6", "--psm 4"):
         try:
             txt = pytesseract.image_to_string(gris, lang="spa+eng", config=cfg)
         except Exception:
