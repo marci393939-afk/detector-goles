@@ -26,7 +26,9 @@ UMBRAL_RACHA_POR_DEFECTO = 60.0
 UMBRAL_POISSON_OVER_DEFECTO = 58.0
 UMBRAL_POISSON_UNDER_DEFECTO = 54.0
 MIN_GOLES_ESPERADOS_OVER = 2.85
+MAX_GOLES_ESPERADOS_UNDER = 2.45
 MIN_EV_PCT_POR_DEFECTO = 0.0
+MIN_EV_DESBLOQUEO_RACHA = 8.0
 
 PAISES_BASE_INICIALES = {
     "muranga": "Kenia",
@@ -992,12 +994,52 @@ def calculate_poisson_markets(
     }
 
 
+def _cumple_racha_o_desbloqueo(
+    r_home: float,
+    r_away: float,
+    prob_pct: float,
+    umbral_racha: float,
+    umbral_poisson: float,
+    ev_info: dict,
+    min_ev_pct: float,
+    min_ev_desbloqueo: float,
+    condicion_goles_ok: bool,
+) -> tuple[bool, str]:
+    media_racha = (r_home + r_away) / 2.0
+    min_racha = min(r_home, r_away)
+    ev_val = ev_info.get("ev_pct")
+
+    if not condicion_goles_ok or prob_pct < umbral_poisson:
+        return False, "normal"
+
+    if ev_info["tiene_cuota"] and (ev_val is None or ev_val < min_ev_pct):
+        return False, "normal"
+
+    # Regla estándar de racha
+    if (r_home >= umbral_racha and r_away >= umbral_racha) or (
+        media_racha >= 60.0 and min_racha >= 45.0
+    ):
+        return True, "Racha confirmada"
+
+    # Vía alternativa: desbloqueo cuando Poisson y +EV son altos aunque haya un 50% de racha
+    if min_racha >= 50.0 and media_racha >= 55.0:
+        if ev_info["tiene_cuota"]:
+            if ev_val is not None and ev_val >= min_ev_desbloqueo and prob_pct >= (umbral_poisson + 2.0):
+                return True, f"Desbloqueo +EV ({ev_val:+.1f}%) y Poisson"
+        else:
+            if prob_pct >= (umbral_poisson + 6.0):
+                return True, "Desbloqueo por Poisson alto"
+
+    return False, "normal"
+
+
 def seleccionar_pronostico_goal(
     markets: dict,
     cuota_x: float = 0.0,
     cuota_o25: float = 0.0,
     cuota_u25: float = 0.0,
     min_ev_pct: float = MIN_EV_PCT_POR_DEFECTO,
+    min_ev_desbloqueo: float = MIN_EV_DESBLOQUEO_RACHA,
     home_stats: dict | None = None,
     away_stats: dict | None = None,
     mismo_equipo: bool = False,
@@ -1006,6 +1048,7 @@ def seleccionar_pronostico_goal(
     umbral_poisson_over: float = UMBRAL_POISSON_OVER_DEFECTO,
     umbral_poisson_under: float = UMBRAL_POISSON_UNDER_DEFECTO,
     min_goles_over: float = MIN_GOLES_ESPERADOS_OVER,
+    max_goles_under: float = MAX_GOLES_ESPERADOS_UNDER,
 ) -> dict:
     resultado_exacto = {
         "under_marcador": markets.get("under_exact_score", "1 - 0"),
@@ -1031,6 +1074,7 @@ def seleccionar_pronostico_goal(
             "racha_home": h_under,
             "racha_away": a_under,
             "prob_poisson": prob_u25_pct,
+            "via_senal": "",
             "resultado_exacto": resultado_exacto,
         }
 
@@ -1042,33 +1086,38 @@ def seleccionar_pronostico_goal(
             "racha_home": h_under,
             "racha_away": a_under,
             "prob_poisson": prob_u25_pct,
+            "via_senal": "",
             "resultado_exacto": resultado_exacto,
         }
-
-    media_under = (h_under + a_under) / 2.0
-    cumple_racha_under = (h_under >= umbral_racha and a_under >= umbral_racha) or (
-        media_under >= 60.0 and min(h_under, a_under) >= 45.0
-    )
 
     ev_u25 = evaluar_ev_cuota(markets.get("prob_under_25", 0.0), cuota_u25)
     ev_o25 = evaluar_ev_cuota(markets.get("prob_over_25", 0.0), cuota_o25)
 
-    candidato_under = cumple_racha_under and prob_u25_pct >= umbral_poisson_under and (
-        not ev_u25["tiene_cuota"]
-        or (ev_u25["ev_pct"] is not None and ev_u25["ev_pct"] >= min_ev_pct)
-    )
-    candidato_over = (
-        h_over >= umbral_racha
-        and a_over >= umbral_racha
-        and prob_o25_pct >= umbral_poisson_over
-        and goles_esp >= min_goles_over
-        and (
-            not ev_o25["tiene_cuota"]
-            or (ev_o25["ev_pct"] is not None and ev_o25["ev_pct"] >= min_ev_pct)
-        )
+    under_ok, via_under = _cumple_racha_o_desbloqueo(
+        r_home=h_under,
+        r_away=a_under,
+        prob_pct=prob_u25_pct,
+        umbral_racha=umbral_racha,
+        umbral_poisson=umbral_poisson_under,
+        ev_info=ev_u25,
+        min_ev_pct=min_ev_pct,
+        min_ev_desbloqueo=min_ev_desbloqueo,
+        condicion_goles_ok=goles_esp <= max_goles_under,
     )
 
-    if candidato_under and candidato_over:
+    over_ok, via_over = _cumple_racha_o_desbloqueo(
+        r_home=h_over,
+        r_away=a_over,
+        prob_pct=prob_o25_pct,
+        umbral_racha=umbral_racha,
+        umbral_poisson=umbral_poisson_over,
+        ev_info=ev_o25,
+        min_ev_pct=min_ev_pct,
+        min_ev_desbloqueo=min_ev_desbloqueo,
+        condicion_goles_ok=goles_esp >= min_goles_over,
+    )
+
+    if under_ok and over_ok:
         ventaja_under = (prob_u25_pct - umbral_poisson_under) + (
             (ev_u25["ev_pct"] or 0.0) if ev_u25["tiene_cuota"] else 0.0
         )
@@ -1076,11 +1125,11 @@ def seleccionar_pronostico_goal(
             (ev_o25["ev_pct"] or 0.0) if ev_o25["tiene_cuota"] else 0.0
         )
         if ventaja_under >= ventaja_over:
-            candidato_over = False
+            over_ok = False
         else:
-            candidato_under = False
+            under_ok = False
 
-    if candidato_under:
+    if under_ok:
         return {
             "apostar": True,
             "pick": "UNDER 2.5 GOLES",
@@ -1091,10 +1140,11 @@ def seleccionar_pronostico_goal(
             "racha_home": h_under,
             "racha_away": a_under,
             "prob_poisson": prob_u25_pct,
+            "via_senal": via_under,
             "resultado_exacto": resultado_exacto,
         }
 
-    if candidato_over:
+    if over_ok:
         return {
             "apostar": True,
             "pick": "OVER 2.5 GOLES",
@@ -1105,6 +1155,7 @@ def seleccionar_pronostico_goal(
             "racha_home": h_over,
             "racha_away": a_over,
             "prob_poisson": prob_o25_pct,
+            "via_senal": via_over,
             "resultado_exacto": resultado_exacto,
         }
 
@@ -1118,6 +1169,7 @@ def seleccionar_pronostico_goal(
         "racha_home": max(h_under, h_over),
         "racha_away": max(a_under, a_over),
         "prob_poisson": max(prob_u25_pct, prob_o25_pct),
+        "via_senal": "",
         "resultado_exacto": resultado_exacto,
     }
 
@@ -1167,11 +1219,25 @@ def main() -> None:
             value=UMBRAL_POISSON_UNDER_DEFECTO,
             step=1.0,
         )
+        max_goles_under = st.slider(
+            "Máx. goles esperados -2.5",
+            min_value=2.00,
+            max_value=2.80,
+            value=MAX_GOLES_ESPERADOS_UNDER,
+            step=0.05,
+        )
         min_ev_pct = st.slider(
             "EV mínimo exigido (%)",
             min_value=-5.0,
             max_value=15.0,
             value=MIN_EV_PCT_POR_DEFECTO,
+            step=0.5,
+        )
+        min_ev_desbloqueo = st.slider(
+            "EV mín. desbloqueo 50% racha (%)",
+            min_value=0.0,
+            max_value=20.0,
+            value=MIN_EV_DESBLOQUEO_RACHA,
             step=0.5,
         )
         media_liga = st.number_input(
@@ -1184,12 +1250,12 @@ def main() -> None:
 
     col_eq1, col_eq2, col_pais = st.columns([2, 2, 1.5])
     with col_eq1:
-        local_nombre = st.text_input("Equipo Local", placeholder="Ej: Ismaily")
+        local_nombre = st.text_input("Equipo Local", placeholder="Ej: Independiente")
     with col_eq2:
-        visitante_nombre = st.text_input("Equipo Visitante", placeholder="Ej: Baladiyyat AL Mehalla")
+        visitante_nombre = st.text_input("Equipo Visitante", placeholder="Ej: Real Oruro")
     with col_pais:
         pais_defecto = consultar_pais_equipo(local_nombre) or consultar_pais_equipo(visitante_nombre)
-        pais_partido = st.text_input("País", value=pais_defecto, placeholder="Ej: Egipto")
+        pais_partido = st.text_input("País", value=pais_defecto, placeholder="Ej: Bolivia")
 
     col_c1, col_c2, col_c3 = st.columns(3)
     with col_c1:
@@ -1333,6 +1399,7 @@ def main() -> None:
             cuota_o25=cuota_o25,
             cuota_u25=cuota_u25,
             min_ev_pct=min_ev_pct,
+            min_ev_desbloqueo=min_ev_desbloqueo,
             home_stats=home_stats,
             away_stats=away_stats,
             mismo_equipo=normalizar_texto(nombre_local_final) == normalizar_texto(nombre_vis_final),
@@ -1341,6 +1408,7 @@ def main() -> None:
             umbral_poisson_over=umbral_poisson_over,
             umbral_poisson_under=umbral_poisson_under,
             min_goles_over=min_goles_over,
+            max_goles_under=max_goles_under,
         )
 
         st.caption(
@@ -1383,9 +1451,10 @@ def main() -> None:
             cuota_usada = cuota_u25 if es_under else cuota_o25
             cuota_justa_pick = pronostico["cuota_justa"]
             ev_info = evaluar_ev_cuota(pronostico["prob_raw"], cuota_usada)
+            via_txt = f" · `{pronostico['via_senal']}`" if pronostico.get("via_senal") else ""
 
             st.success(
-                f"### ✅ DOBLE CONFIRMACIÓN → {pronostico['pick']} | EXACTO {etiqueta_top} → `{marcador_top}`\n\n"
+                f"### ✅ SEÑAL ACTIVA → {pronostico['pick']} | EXACTO {etiqueta_top} → `{marcador_top}`{via_txt}\n\n"
                 f"**Racha:** Local `{pronostico['racha_home']:.1f}%` · Visitante `{pronostico['racha_away']:.1f}%` | "
                 f"**Poisson:** `{pronostico['prob_poisson']:.1f}%` (cuota justa `{cuota_justa_pick}`)\n\n"
                 f"**Marcadores exactos {etiqueta_top} más probables:** {top3_txt}"
