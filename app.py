@@ -323,6 +323,21 @@ def normalizar_texto(texto: str) -> str:
     return re.sub(r"\s+", " ", sin_tildes).strip().lower()
 
 
+def _parsear_cuota_texto(valor: str | float | int | None) -> float:
+    if valor is None:
+        return 0.0
+    if isinstance(valor, (int, float)):
+        return float(valor)
+    limpio = str(valor).strip().replace(",", ".")
+    limpio = re.sub(r"[^0-9.]", "", limpio)
+    if not limpio:
+        return 0.0
+    try:
+        return float(limpio)
+    except ValueError:
+        return 0.0
+
+
 def _clave_equipo_cache(nombre: str) -> str:
     norm = normalizar_texto(nombre)
     norm = re.sub(r"['’`]", "", norm)
@@ -1015,13 +1030,11 @@ def _cumple_racha_o_desbloqueo(
     if ev_info["tiene_cuota"] and (ev_val is None or ev_val < min_ev_pct):
         return False, "normal"
 
-    # Regla estándar de racha
     if (r_home >= umbral_racha and r_away >= umbral_racha) or (
         media_racha >= 60.0 and min_racha >= 45.0
     ):
         return True, "Racha confirmada"
 
-    # Vía alternativa: desbloqueo cuando Poisson y +EV son altos aunque haya un 50% de racha
     if min_racha >= 50.0 and media_racha >= 55.0:
         if ev_info["tiene_cuota"]:
             if ev_val is not None and ev_val >= min_ev_desbloqueo and prob_pct >= (umbral_poisson + 2.0):
@@ -1174,9 +1187,20 @@ def seleccionar_pronostico_goal(
     }
 
 
+def _limpiar_todo() -> None:
+    st.session_state["form_nonce"] = st.session_state.get("form_nonce", 0) + 1
+    st.session_state["ultimo_analisis"] = None
+
+
 def main() -> None:
     if "registro_picks" not in st.session_state:
         st.session_state["registro_picks"] = []
+    if "form_nonce" not in st.session_state:
+        st.session_state["form_nonce"] = 0
+    if "ultimo_analisis" not in st.session_state:
+        st.session_state["ultimo_analisis"] = None
+
+    nonce = st.session_state["form_nonce"]
 
     st.title("⚽ Detector de Goles (+2.5 / -2.5) · Flujo Equilibrado")
 
@@ -1186,9 +1210,10 @@ def main() -> None:
             "Fuente de datos",
             ["Goal API", "API-Football", "Manual / Capturas OCR"],
             index=0,
+            key=f"fuente_datos_{nonce}",
         )
-        goal_key_input = st.text_input("GOAL_KEY", type="password")
-        api_key_input = st.text_input("API_FOOTBALL_KEY", type="password")
+        goal_key_input = st.text_input("GOAL_KEY", type="password", key=f"goal_key_{nonce}")
+        api_key_input = st.text_input("API_FOOTBALL_KEY", type="password", key=f"api_key_{nonce}")
 
         st.divider()
         umbral_racha = st.slider(
@@ -1197,6 +1222,7 @@ def main() -> None:
             max_value=80.0,
             value=UMBRAL_RACHA_POR_DEFECTO,
             step=5.0,
+            key=f"umbral_racha_{nonce}",
         )
         umbral_poisson_over = st.slider(
             "Umbral Poisson +2.5 (%)",
@@ -1204,6 +1230,7 @@ def main() -> None:
             max_value=75.0,
             value=UMBRAL_POISSON_OVER_DEFECTO,
             step=1.0,
+            key=f"umbral_p_over_{nonce}",
         )
         min_goles_over = st.slider(
             "Mín. goles esperados +2.5",
@@ -1211,6 +1238,7 @@ def main() -> None:
             max_value=3.60,
             value=MIN_GOLES_ESPERADOS_OVER,
             step=0.05,
+            key=f"min_g_over_{nonce}",
         )
         umbral_poisson_under = st.slider(
             "Umbral Poisson -2.5 (%)",
@@ -1218,6 +1246,7 @@ def main() -> None:
             max_value=75.0,
             value=UMBRAL_POISSON_UNDER_DEFECTO,
             step=1.0,
+            key=f"umbral_p_under_{nonce}",
         )
         max_goles_under = st.slider(
             "Máx. goles esperados -2.5",
@@ -1225,6 +1254,7 @@ def main() -> None:
             max_value=2.80,
             value=MAX_GOLES_ESPERADOS_UNDER,
             step=0.05,
+            key=f"max_g_under_{nonce}",
         )
         min_ev_pct = st.slider(
             "EV mínimo exigido (%)",
@@ -1232,6 +1262,7 @@ def main() -> None:
             max_value=15.0,
             value=MIN_EV_PCT_POR_DEFECTO,
             step=0.5,
+            key=f"min_ev_{nonce}",
         )
         min_ev_desbloqueo = st.slider(
             "EV mín. desbloqueo 50% racha (%)",
@@ -1239,6 +1270,7 @@ def main() -> None:
             max_value=20.0,
             value=MIN_EV_DESBLOQUEO_RACHA,
             step=0.5,
+            key=f"min_ev_desb_{nonce}",
         )
         media_liga = st.number_input(
             "Media goles/equipo aplicada",
@@ -1246,42 +1278,96 @@ def main() -> None:
             max_value=2.50,
             value=1.35,
             step=0.05,
+            key=f"media_liga_{nonce}",
         )
 
     col_eq1, col_eq2, col_pais = st.columns([2, 2, 1.5])
     with col_eq1:
-        local_nombre = st.text_input("Equipo Local", placeholder="Ej: Independiente")
+        local_nombre = st.text_input(
+            "Equipo Local",
+            placeholder="Ej: Independiente",
+            key=f"local_nombre_{nonce}",
+        )
     with col_eq2:
-        visitante_nombre = st.text_input("Equipo Visitante", placeholder="Ej: Real Oruro")
+        visitante_nombre = st.text_input(
+            "Equipo Visitante",
+            placeholder="Ej: Real Oruro",
+            key=f"visitante_nombre_{nonce}",
+        )
     with col_pais:
         pais_defecto = consultar_pais_equipo(local_nombre) or consultar_pais_equipo(visitante_nombre)
-        pais_partido = st.text_input("País", value=pais_defecto, placeholder="Ej: Bolivia")
+        pais_partido = st.text_input(
+            "País",
+            value=pais_defecto,
+            placeholder="Ej: Bolivia",
+            key=f"pais_partido_{nonce}",
+        )
 
     col_c1, col_c2, col_c3 = st.columns(3)
     with col_c1:
-        cuota_o25 = st.number_input("Cuota Winamax (+2.5)", min_value=0.0, value=0.0, step=0.01)
+        cuota_o25_txt = st.text_input(
+            "Cuota Winamax (+2.5)",
+            placeholder="Ej: 1.88",
+            key=f"cuota_o25_{nonce}",
+        )
     with col_c2:
-        cuota_u25 = st.number_input("Cuota Winamax (-2.5)", min_value=0.0, value=0.0, step=0.01)
+        cuota_u25_txt = st.text_input(
+            "Cuota Winamax (-2.5)",
+            placeholder="Ej: 1.95",
+            key=f"cuota_u25_{nonce}",
+        )
     with col_c3:
-        cuota_x = st.number_input("Cuota Empate (X)", min_value=0.0, value=0.0, step=0.01)
+        cuota_x_txt = st.text_input(
+            "Cuota Empate (X)",
+            placeholder="Ej: 3.40",
+            key=f"cuota_x_{nonce}",
+        )
+
+    cuota_o25 = _parsear_cuota_texto(cuota_o25_txt)
+    cuota_u25 = _parsear_cuota_texto(cuota_u25_txt)
+    cuota_x = _parsear_cuota_texto(cuota_x_txt)
 
     with st.expander("Capturas OCR o marcadores manuales (opcional)", expanded=False):
         c_img1, c_img2 = st.columns(2)
         with c_img1:
-            img_local = st.file_uploader("Captura últimos partidos Local", type=["png", "jpg", "jpeg"])
+            img_local = st.file_uploader(
+                "Captura últimos partidos Local",
+                type=["png", "jpg", "jpeg"],
+                key=f"img_local_{nonce}",
+            )
         with c_img2:
-            img_vis = st.file_uploader("Captura últimos partidos Visitante", type=["png", "jpg", "jpeg"])
+            img_vis = st.file_uploader(
+                "Captura últimos partidos Visitante",
+                type=["png", "jpg", "jpeg"],
+                key=f"img_vis_{nonce}",
+            )
 
         marcadores_local_txt = st.text_input(
             "Marcadores manuales Local (ej: 1-0, 0-0, 1-1, 0-2, 1-0, 0-1)",
             value="",
+            key=f"m_local_{nonce}",
         )
         marcadores_vis_txt = st.text_input(
             "Marcadores manuales Visitante (ej: 0-1, 1-1, 0-0, 1-2, 0-0, 1-0)",
             value="",
+            key=f"m_vis_{nonce}",
         )
 
-    if st.button("Calcular pronóstico y valor (+EV)", type="primary", use_container_width=True):
+    col_b1, col_b2 = st.columns([3, 1])
+    with col_b1:
+        calcular_pulsado = st.button(
+            "Calcular pronóstico y valor (+EV)",
+            type="primary",
+            use_container_width=True,
+        )
+    with col_b2:
+        st.button(
+            "Limpiar todo",
+            use_container_width=True,
+            on_click=_limpiar_todo,
+        )
+
+    if calcular_pulsado:
         if not local_nombre.strip() or not visitante_nombre.strip():
             st.error("Introduce el nombre del equipo local y del visitante.")
             return
@@ -1372,11 +1458,6 @@ def main() -> None:
         n_away = int(away_stats.get("partidos", 0))
         muestra_insuf = n_home < 6 or n_away < 6
 
-        if n_home < 10:
-            st.warning(f"{nombre_local_final}: se detectaron {n_home} marcadores (ideal: 10).")
-        if n_away < 10:
-            st.warning(f"{nombre_vis_final}: se detectaron {n_away} marcadores (ideal: 10).")
-
         ataque_local = home_stats["gf_prom"] / media_liga
         defensa_vis = away_stats["gc_prom"] / media_liga
         ataque_vis = away_stats["gf_prom"] / media_liga
@@ -1410,6 +1491,39 @@ def main() -> None:
             min_goles_over=min_goles_over,
             max_goles_under=max_goles_under,
         )
+
+        st.session_state["ultimo_analisis"] = {
+            "nombre_local_final": nombre_local_final,
+            "nombre_vis_final": nombre_vis_final,
+            "n_home": n_home,
+            "n_away": n_away,
+            "media_liga": media_liga,
+            "home_stats": home_stats,
+            "away_stats": away_stats,
+            "markets": markets,
+            "pronostico": pronostico,
+            "cuota_o25": cuota_o25,
+            "cuota_u25": cuota_u25,
+        }
+
+    analisis = st.session_state.get("ultimo_analisis")
+    if analisis:
+        nombre_local_final = analisis["nombre_local_final"]
+        nombre_vis_final = analisis["nombre_vis_final"]
+        n_home = analisis["n_home"]
+        n_away = analisis["n_away"]
+        media_liga = analisis["media_liga"]
+        home_stats = analisis["home_stats"]
+        away_stats = analisis["away_stats"]
+        markets = analisis["markets"]
+        pronostico = analisis["pronostico"]
+        cuota_o25 = analisis["cuota_o25"]
+        cuota_u25 = analisis["cuota_u25"]
+
+        if n_home < 10:
+            st.warning(f"{nombre_local_final}: se detectaron {n_home} marcadores (ideal: 10).")
+        if n_away < 10:
+            st.warning(f"{nombre_vis_final}: se detectaron {n_away} marcadores (ideal: 10).")
 
         st.caption(
             f"Partido: **{nombre_local_final}** vs **{nombre_vis_final}** · "
