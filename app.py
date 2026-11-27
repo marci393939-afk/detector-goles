@@ -1,4 +1,3 @@
-
 import json
 import math
 import os
@@ -89,6 +88,9 @@ PAISES_BASE_INICIALES = {
     "atletico-go": "Brasil",
     "atletico goianiense": "Brasil",
     "vila nova": "Brasil",
+    "deportivo cali": "Colombia",
+    "atletico bucaramanga": "Colombia",
+    "atl. bucaramanga": "Colombia",
     "kokand 1912": "Uzbekistán",
     "xorazm urganch": "Uzbekistán",
 }
@@ -187,6 +189,8 @@ ALIAS_EQUIPOS = {
     "atletico go": "Atletico Goianiense",
     "atletico-go": "Atletico Goianiense",
     "atletico goianiense": "Atletico Goianiense",
+    "atl. bucaramanga": "Atletico Bucaramanga",
+    "atletico bucaramanga": "Atletico Bucaramanga",
     "marsella": "Marseille",
     "olympique marsella": "Marseille",
     "olympique de marsella": "Marseille",
@@ -346,6 +350,13 @@ def _parsear_cuota_texto(valor: str | float | int | None) -> float:
         return 0.0
 
 
+def _parsear_marcadores_texto(texto: str) -> list[tuple[int, int]]:
+    if not texto or not texto.strip():
+        return []
+    pares = re.findall(r"\b([0-9])\s*[-–:]\s*([0-9])\b", texto)
+    return [(int(a), int(b)) for a, b in pares if int(a) <= 9 and int(b) <= 9][:10]
+
+
 def _clave_equipo_cache(nombre: str) -> str:
     norm = normalizar_texto(nombre)
     norm = re.sub(r"['’`]", "", norm)
@@ -490,19 +501,30 @@ def _formatear_marcadores_top(items: list[dict], limite: int = 3) -> str:
 
 
 def extraer_datos_desde_imagen(imagen: Image.Image) -> dict:
-    gris = ImageOps.grayscale(imagen)
-    gris = ImageEnhance.Contrast(gris).enhance(1.8)
-    texto = ""
-    try:
-        texto = pytesseract.image_to_string(gris, lang="spa+eng")
-    except Exception:
-        try:
-            texto = pytesseract.image_to_string(gris)
-        except Exception:
-            texto = ""
+    w, h = imagen.size
+    escala = 2 if max(w, h) < 1200 else 1
+    base = imagen.convert("RGB")
+    if escala > 1:
+        base = base.resize((w * escala, h * escala), Image.Resampling.LANCZOS)
 
-    marcadores = re.findall(r"\b([0-9])\s*[-–:]\s*([0-9])\b", texto)
-    resultados = [(int(a), int(b)) for a, b in marcadores if int(a) <= 9 and int(b) <= 9]
+    gris = ImageOps.grayscale(base)
+    gris = ImageOps.autocontrast(gris)
+    gris = ImageEnhance.Contrast(gris).enhance(2.0)
+
+    textos = []
+    for cfg in ("--psm 6", "--psm 4", "--psm 11"):
+        try:
+            txt = pytesseract.image_to_string(gris, lang="spa+eng", config=cfg)
+        except Exception:
+            try:
+                txt = pytesseract.image_to_string(gris, config=cfg)
+            except Exception:
+                txt = ""
+        if txt:
+            textos.append(txt)
+
+    texto = "\n".join(textos)
+    resultados = _parsear_marcadores_texto(texto)
 
     lineas_limpias = []
     for linea in texto.splitlines():
@@ -514,7 +536,8 @@ def extraer_datos_desde_imagen(imagen: Image.Image) -> dict:
             continue
         if re.fullmatch(r"[0-9\s\-:./]+", l_strip):
             continue
-        lineas_limpias.append(l_strip)
+        if l_strip not in lineas_limpias:
+            lineas_limpias.append(l_strip)
 
     return {
         "texto": texto,
@@ -552,6 +575,7 @@ def resumir_marcadores_manuales(marcadores: list[tuple[int, int]], es_local: boo
         "ga_avg": gc_w / w_sum,
         "over25_rate": over_rate,
         "under25_rate": under_rate,
+        "marcadores_usados": [f"{a}-{b}" for a, b in marcadores[:10]],
     }
 
 
@@ -641,6 +665,7 @@ def obtener_promedios_10_api(team_id: int, api_key: str) -> dict | None:
     peso_total = 0.0
     validos = 0
     under25_count = 0
+    marcadores_lista = []
 
     for idx, f in enumerate(partidos_ordenados):
         teams = f.get("teams", {})
@@ -653,6 +678,7 @@ def obtener_promedios_10_api(team_id: int, api_key: str) -> dict | None:
         if g_home is None or g_away is None:
             continue
 
+        marcadores_lista.append(f"{int(g_home)}-{int(g_away)}")
         total_goles = int(g_home) + int(g_away)
         if total_goles < 3:
             under25_count += 1
@@ -685,6 +711,7 @@ def obtener_promedios_10_api(team_id: int, api_key: str) -> dict | None:
         "gc_prom": round(gc_total / peso_total, 2),
         "under25_rate": under_rate,
         "over25_rate": over_rate,
+        "marcadores_usados": marcadores_lista,
     }
 
 
@@ -808,6 +835,7 @@ def goal_summarize_team_goals(
             "under25_rate": 0.0,
             "venue_used": False,
             "matches": [],
+            "marcadores_usados": [],
         }
 
     gf_w_sum = 0.0
@@ -820,6 +848,7 @@ def goal_summarize_team_goals(
 
     over25_count = 0
     rows = []
+    marcadores_lista = []
 
     for idx, m in enumerate(subset):
         hg = int(m["homeTeamFtScore"])
@@ -828,6 +857,7 @@ def goal_summarize_team_goals(
         gf_real = hg if is_home else ag
         ga_real = ag if is_home else hg
         total_real = hg + ag
+        marcadores_lista.append(f"{hg}-{ag}")
 
         if total_real >= 3:
             over25_count += 1
@@ -886,6 +916,7 @@ def goal_summarize_team_goals(
         "under25_rate": under_rate,
         "venue_used": venue_used,
         "matches": rows,
+        "marcadores_usados": marcadores_lista,
     }
 
 
@@ -1314,13 +1345,13 @@ def main() -> None:
     with col_eq1:
         local_nombre = st.text_input(
             "Equipo Local",
-            placeholder="Ej: Vila Nova",
+            placeholder="Ej: Deportivo Cali",
             key=f"local_nombre_{nonce}",
         )
     with col_eq2:
         visitante_nombre = st.text_input(
             "Equipo Visitante",
-            placeholder="Ej: Atlético-GO",
+            placeholder="Ej: Atlético Bucaramanga",
             key=f"visitante_nombre_{nonce}",
         )
     with col_pais:
@@ -1328,7 +1359,7 @@ def main() -> None:
         pais_partido = st.text_input(
             "País",
             value=pais_defecto,
-            placeholder="Ej: Brasil",
+            placeholder="Ej: Colombia",
             key=f"pais_partido_{nonce}",
         )
 
@@ -1356,28 +1387,29 @@ def main() -> None:
     cuota_u25 = _parsear_cuota_texto(cuota_u25_txt)
     cuota_x = _parsear_cuota_texto(cuota_x_txt)
 
-    with st.expander("Capturas OCR o marcadores manuales (opcional)", expanded=False):
-        c_img1, c_img2 = st.columns(2)
-        with c_img1:
-            img_local = st.file_uploader(
-                "Captura últimos partidos Local",
-                type=["png", "jpg", "jpeg"],
-                key=f"img_local_{nonce}",
-            )
-        with c_img2:
-            img_vis = st.file_uploader(
-                "Captura últimos partidos Visitante",
-                type=["png", "jpg", "jpeg"],
-                key=f"img_vis_{nonce}",
-            )
+    st.markdown("#### Capturas de últimos 10 partidos (Local y Visitante)")
+    c_img1, c_img2 = st.columns(2)
+    with c_img1:
+        img_local = st.file_uploader(
+            "Captura 10 últimos partidos LOCAL",
+            type=["png", "jpg", "jpeg"],
+            key=f"img_local_{nonce}",
+        )
+    with c_img2:
+        img_vis = st.file_uploader(
+            "Captura 10 últimos partidos VISITANTE",
+            type=["png", "jpg", "jpeg"],
+            key=f"img_vis_{nonce}",
+        )
 
+    with st.expander("Ajustar o escribir marcadores manualmente (opcional)", expanded=False):
         marcadores_local_txt = st.text_input(
-            "Marcadores manuales Local (ej: 1-0, 0-0, 1-1, 0-2, 1-0, 0-1)",
+            "Marcadores manuales Local (ej: 2-1, 0-0, 2-2, 0-0, 2-0, 1-1, 0-3, 0-0, 0-0, 3-1)",
             value="",
             key=f"m_local_{nonce}",
         )
         marcadores_vis_txt = st.text_input(
-            "Marcadores manuales Visitante (ej: 0-1, 1-1, 0-0, 1-2, 0-0, 1-0)",
+            "Marcadores manuales Visitante (ej: 1-0, 2-1, 0-2, 1-1, 1-0, 0-0, 2-0, 1-2, 0-1, 1-1)",
             value="",
             key=f"m_vis_{nonce}",
         )
@@ -1411,82 +1443,112 @@ def main() -> None:
         nombre_vis_input = visitante_nombre.strip()
         nombre_local_final = nombre_local_input
         nombre_vis_final = nombre_vis_input
+        origen_local = fuente_datos
+        origen_vis = fuente_datos
+
+        m_loc_manual = _parsear_marcadores_texto(marcadores_local_txt)
+        m_vis_manual = _parsear_marcadores_texto(marcadores_vis_txt)
+
+        m_loc_ocr: list[tuple[int, int]] = []
+        m_vis_ocr: list[tuple[int, int]] = []
 
         try:
-            if fuente_datos == "Goal API":
+            if img_local is not None:
+                ocr_l = extraer_datos_desde_imagen(Image.open(BytesIO(img_local.getvalue())))
+                m_loc_ocr = ocr_l["marcadores"]
+
+            if img_vis is not None:
+                ocr_v = extraer_datos_desde_imagen(Image.open(BytesIO(img_vis.getvalue())))
+                m_vis_ocr = ocr_v["marcadores"]
+
+            # Resolver nombres si se usa API para cualquiera de los dos lados
+            necesita_api_local = not m_loc_manual and not m_loc_ocr and fuente_datos != "Manual / Capturas OCR"
+            necesita_api_vis = not m_vis_manual and not m_vis_ocr and fuente_datos != "Manual / Capturas OCR"
+
+            if fuente_datos == "Goal API" and (necesita_api_local or necesita_api_vis):
                 g_key = obtener_goal_key(goal_key_input)
                 if not g_key:
                     st.error("Falta configurar GOAL_KEY en la barra lateral o en secrets.")
                     return
-                t_home = goal_resolve_team(nombre_local_input, pais_partido or None, g_key)
-                t_away = goal_resolve_team(nombre_vis_input, pais_partido or None, g_key)
-                if not t_home or not t_away:
-                    st.error(
-                        "No se encontró alguno de los equipos en Goal API con el país indicado."
-                    )
-                    return
-                nombre_local_final = t_home.get("name", nombre_local_input)
-                nombre_vis_final = t_away.get("name", nombre_vis_input)
-                res_h = goal_fetch_team_results(t_home["id"], g_key)
-                res_a = goal_fetch_team_results(t_away["id"], g_key)
-                sum_h = goal_summarize_team_goals(res_h, t_home["id"], last_n=10, prefer_venue="home")
-                sum_a = goal_summarize_team_goals(res_a, t_away["id"], last_n=10, prefer_venue="away")
-                home_stats = {
-                    "partidos": sum_h["count"],
-                    "gf_prom": sum_h["gf_avg"],
-                    "gc_prom": sum_h["ga_avg"],
-                    "under25_rate": sum_h["under25_rate"],
-                    "over25_rate": sum_h["over25_rate"],
-                }
-                away_stats = {
-                    "partidos": sum_a["count"],
-                    "gf_prom": sum_a["gf_avg"],
-                    "gc_prom": sum_a["ga_avg"],
-                    "under25_rate": sum_a["under25_rate"],
-                    "over25_rate": sum_a["over25_rate"],
-                }
+                if necesita_api_local:
+                    t_home = goal_resolve_team(nombre_local_input, pais_partido or None, g_key)
+                    if not t_home:
+                        st.error("No se encontró el equipo local en Goal API con el país indicado.")
+                        return
+                    nombre_local_final = t_home.get("name", nombre_local_input)
+                    res_h = goal_fetch_team_results(t_home["id"], g_key)
+                    sum_h = goal_summarize_team_goals(res_h, t_home["id"], last_n=10, prefer_venue="home")
+                    home_stats = {
+                        "partidos": sum_h["count"],
+                        "gf_prom": sum_h["gf_avg"],
+                        "gc_prom": sum_h["ga_avg"],
+                        "under25_rate": sum_h["under25_rate"],
+                        "over25_rate": sum_h["over25_rate"],
+                        "marcadores_usados": sum_h["marcadores_usados"],
+                    }
+                    origen_local = "Goal API"
 
-            elif fuente_datos == "API-Football":
+                if necesita_api_vis:
+                    t_away = goal_resolve_team(nombre_vis_input, pais_partido or None, g_key)
+                    if not t_away:
+                        st.error("No se encontró el equipo visitante en Goal API con el país indicado.")
+                        return
+                    nombre_vis_final = t_away.get("name", nombre_vis_input)
+                    res_a = goal_fetch_team_results(t_away["id"], g_key)
+                    sum_a = goal_summarize_team_goals(res_a, t_away["id"], last_n=10, prefer_venue="away")
+                    away_stats = {
+                        "partidos": sum_a["count"],
+                        "gf_prom": sum_a["gf_avg"],
+                        "gc_prom": sum_a["ga_avg"],
+                        "under25_rate": sum_a["under25_rate"],
+                        "over25_rate": sum_a["over25_rate"],
+                        "marcadores_usados": sum_a["marcadores_usados"],
+                    }
+                    origen_vis = "Goal API"
+
+            elif fuente_datos == "API-Football" and (necesita_api_local or necesita_api_vis):
                 a_key = obtener_api_key(api_key_input)
                 if not a_key:
                     st.error("Falta configurar API_FOOTBALL_KEY en la barra lateral o en secrets.")
                     return
-                t_home = buscar_equipo_api(nombre_local_input, a_key, pais_partido or None)
-                t_away = buscar_equipo_api(nombre_vis_input, a_key, pais_partido or None)
-                if not t_home or not t_away:
-                    st.error(
-                        "No se encontró alguno de los equipos en API-Football con el país indicado."
-                    )
-                    return
-                nombre_local_final = t_home.get("name", nombre_local_input)
-                nombre_vis_final = t_away.get("name", nombre_vis_input)
-                home_stats = obtener_promedios_10_api(t_home["id"], a_key)
-                away_stats = obtener_promedios_10_api(t_away["id"], a_key)
+                if necesita_api_local:
+                    t_home = buscar_equipo_api(nombre_local_input, a_key, pais_partido or None)
+                    if not t_home:
+                        st.error("No se encontró el equipo local en API-Football con el país indicado.")
+                        return
+                    nombre_local_final = t_home.get("name", nombre_local_input)
+                    home_stats = obtener_promedios_10_api(t_home["id"], a_key)
+                    origen_local = "API-Football"
 
-            else:
-                m_loc = [
-                    (int(a), int(b))
-                    for a, b in re.findall(r"(\d+)\s*[-:]\s*(\d+)", marcadores_local_txt)
-                ]
-                m_vis = [
-                    (int(a), int(b))
-                    for a, b in re.findall(r"(\d+)\s*[-:]\s*(\d+)", marcadores_vis_txt)
-                ]
-                if img_local is not None and not m_loc:
-                    ocr_l = extraer_datos_desde_imagen(Image.open(BytesIO(img_local.read())))
-                    m_loc = ocr_l["marcadores"]
-                if img_vis is not None and not m_vis:
-                    ocr_v = extraer_datos_desde_imagen(Image.open(BytesIO(img_vis.read())))
-                    m_vis = ocr_v["marcadores"]
-                home_stats = resumir_marcadores_manuales(m_loc, es_local=True)
-                away_stats = resumir_marcadores_manuales(m_vis, es_local=True)
+                if necesita_api_vis:
+                    t_away = buscar_equipo_api(nombre_vis_input, a_key, pais_partido or None)
+                    if not t_away:
+                        st.error("No se encontró el equipo visitante en API-Football con el país indicado.")
+                        return
+                    nombre_vis_final = t_away.get("name", nombre_vis_input)
+                    away_stats = obtener_promedios_10_api(t_away["id"], a_key)
+                    origen_vis = "API-Football"
+
+            if m_loc_manual:
+                home_stats = resumir_marcadores_manuales(m_loc_manual, es_local=True)
+                origen_local = "Marcadores manuales"
+            elif m_loc_ocr:
+                home_stats = resumir_marcadores_manuales(m_loc_ocr, es_local=True)
+                origen_local = "Captura OCR"
+
+            if m_vis_manual:
+                away_stats = resumir_marcadores_manuales(m_vis_manual, es_local=True)
+                origen_vis = "Marcadores manuales"
+            elif m_vis_ocr:
+                away_stats = resumir_marcadores_manuales(m_vis_ocr, es_local=True)
+                origen_vis = "Captura OCR"
 
         except Exception as exc:
             st.error(f"Error consultando datos: {exc}")
             return
 
         if not home_stats or not away_stats:
-            st.error("No hay datos suficientes para calcular el partido.")
+            st.error("No hay datos suficientes para calcular el partido. Sube las capturas o introduce los marcadores.")
             return
 
         n_home = int(home_stats.get("partidos", 0))
@@ -1532,6 +1594,8 @@ def main() -> None:
             "nombre_vis_input": nombre_vis_input,
             "nombre_local_final": nombre_local_final,
             "nombre_vis_final": nombre_vis_final,
+            "origen_local": origen_local,
+            "origen_vis": origen_vis,
             "n_home": n_home,
             "n_away": n_away,
             "media_liga": media_liga,
@@ -1549,6 +1613,8 @@ def main() -> None:
         nombre_vis_input = analisis.get("nombre_vis_input", "")
         nombre_local_final = analisis["nombre_local_final"]
         nombre_vis_final = analisis["nombre_vis_final"]
+        origen_local = analisis.get("origen_local", "")
+        origen_vis = analisis.get("origen_vis", "")
         n_home = analisis["n_home"]
         n_away = analisis["n_away"]
         media_liga = analisis["media_liga"]
@@ -1559,18 +1625,16 @@ def main() -> None:
         cuota_o25 = analisis["cuota_o25"]
         cuota_u25 = analisis["cuota_u25"]
 
-        if nombre_local_input and normalizar_texto(nombre_local_input) not in normalizar_texto(
-            nombre_local_final
-        ):
-            st.warning(
-                f"Revisa el equipo local: escribiste '{nombre_local_input}' y se resolvió como '{nombre_local_final}'."
-            )
-        if nombre_vis_input and normalizar_texto(nombre_vis_input) not in normalizar_texto(
-            nombre_vis_final
-        ):
-            st.warning(
-                f"Revisa el equipo visitante: escribiste '{nombre_vis_input}' y se resolvió como '{nombre_vis_final}'."
-            )
+        if origen_local not in ("Captura OCR", "Marcadores manuales") and nombre_local_input:
+            if normalizar_texto(nombre_local_input) not in normalizar_texto(nombre_local_final):
+                st.warning(
+                    f"Revisa el equipo local: escribiste '{nombre_local_input}' y se resolvió como '{nombre_local_final}'."
+                )
+        if origen_vis not in ("Captura OCR", "Marcadores manuales") and nombre_vis_input:
+            if normalizar_texto(nombre_vis_input) not in normalizar_texto(nombre_vis_final):
+                st.warning(
+                    f"Revisa el equipo visitante: escribiste '{nombre_vis_input}' y se resolvió como '{nombre_vis_final}'."
+                )
 
         if n_home < 10:
             st.warning(f"{nombre_local_final}: se detectaron {n_home} marcadores (ideal: 10).")
@@ -1578,10 +1642,19 @@ def main() -> None:
             st.warning(f"{nombre_vis_final}: se detectaron {n_away} marcadores (ideal: 10).")
 
         st.caption(
-            f"Partido: **{nombre_local_final}** vs **{nombre_vis_final}** · "
+            f"Partido: **{nombre_local_final}** ({origen_local}) vs **{nombre_vis_final}** ({origen_vis}) · "
             f"Partidos analizados: `{n_home}` (Local) / `{n_away}` (Visitante) · "
             f"Media goles/equipo aplicada: `{media_liga:.2f}`"
         )
+
+        m_loc_str = ", ".join(home_stats.get("marcadores_usados") or [])
+        m_vis_str = ", ".join(away_stats.get("marcadores_usados") or [])
+        if m_loc_str or m_vis_str:
+            st.caption(
+                f"Marcadores usados → **{nombre_local_final}:** `{m_loc_str or '-'}` | "
+                f"**{nombre_vis_final}:** `{m_vis_str or '-'}`"
+            )
+
         st.info(
             f"**Trayectoria en últimos partidos:** {nombre_local_final} ({n_home} PJ) → "
             f"**-2.5:** `{home_stats['under25_rate']:.1f}%` / **+2.5:** `{home_stats['over25_rate']:.1f}%` | "
