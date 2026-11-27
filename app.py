@@ -77,6 +77,8 @@ PAISES_BASE_INICIALES = {
     "sao paulo": "Brasil",
     "sao paulo fc": "Brasil",
     "remo": "Brasil",
+    "kokand 1912": "Uzbekistán",
+    "xorazm urganch": "Uzbekistán",
 }
 
 PAISES_OCR_MAPA = {
@@ -140,6 +142,8 @@ PAISES_OCR_MAPA = {
     "CAMBOYA": "Camboya",
     "CAMBODIA": "Camboya",
     "CAM": "Camboya",
+    "UZBEKISTAN": "Uzbekistán",
+    "UZBEKISTÁN": "Uzbekistán",
 }
 
 KNOWN_GOAL_TEAMS = {
@@ -295,6 +299,11 @@ PALABRAS_RUIDO = {
     "TMTM",
     "YOUTH FOOTBALL",
     "BLUE EAGLES",
+    "ULTIMOS PARTIDOS",
+    "ÚLTIMOS PARTIDOS",
+    "GENERAL",
+    "LOCAL",
+    "VISITANTE",
 }
 
 
@@ -1288,9 +1297,9 @@ def ejecutar_ocr_digitos_columna(
     imagen = Image.open(BytesIO(img_bytes)).convert("RGB")
     w, h = imagen.size
 
-    x_ini = int(w * 0.70)
+    x_ini = int(w * 0.72)
     x_fin = int(w * 0.99)
-    y_ini = int(h * 0.10)
+    y_ini = int(h * 0.25)
     y_fin = int(h * 0.99)
 
     recorte = imagen.crop((x_ini, y_ini, x_fin, y_fin))
@@ -1323,7 +1332,7 @@ def _linea_es_fecha_o_hora(linea: str) -> bool:
 
 def _linea_es_competicion_o_resultado(linea: str) -> bool:
     limpia = linea.strip().upper()
-    if limpia in {"G", "P", "E", "W", "D", "L"}:
+    if limpia in {"G", "P", "E", "W", "D", "L", "SL", "CUP"}:
         return True
     if re.fullmatch(r"[A-Z]{1,4}\d{1,2}", limpia):
         return True
@@ -1905,9 +1914,8 @@ for clave, valor_ini in {
     "goal_cuota_u25_input": "",
     "pais_ocr_detectado": "",
     "pais_status_msg": "",
-    "ultimo_ocr_partido_file": None,
-    "ultimo_ocr_local_10_file": None,
-    "ultimo_ocr_vis_10_file": None,
+    "ultimo_ocr_cap1_file": None,
+    "ultimo_ocr_cap2_file": None,
     "ultimo_auto_fetch": None,
     "marcadores_local_10_txt": "",
     "marcadores_vis_10_txt": "",
@@ -1937,9 +1945,8 @@ def _limpiar_partido_goal() -> None:
     st.session_state["marcadores_local_10_txt"] = ""
     st.session_state["marcadores_vis_10_txt"] = ""
     st.session_state["ultimo_goal_analisis"] = None
-    st.session_state["ultimo_ocr_partido_file"] = None
-    st.session_state["ultimo_ocr_local_10_file"] = None
-    st.session_state["ultimo_ocr_vis_10_file"] = None
+    st.session_state["ultimo_ocr_cap1_file"] = None
+    st.session_state["ultimo_ocr_cap2_file"] = None
     st.session_state["ultimo_auto_fetch"] = None
     st.session_state["equipo_local_input"] = ""
     st.session_state["equipo_visitante_input"] = ""
@@ -2002,7 +2009,7 @@ def _guardar_paises_cb() -> None:
         st.session_state["pais_status_msg"] = "warn:Introduce al menos un equipo y su país para guardarlo."
 
 
-def _calcular_desde_capturas_3(
+def _calcular_desde_capturas_2(
     home_nombre: str,
     away_nombre: str,
     marcadores_l: list[tuple[int, int]],
@@ -2020,8 +2027,16 @@ def _calcular_desde_capturas_3(
     mismo_equipo = normalizar_texto(loc_limpio) == normalizar_texto(vis_limpio)
 
     comun_limpio = (pais_comun_manual or "").strip()
-    pais_loc = (pais_local_manual or "").strip() or comun_limpio or consultar_pais_equipo(loc_limpio)
-    pais_vis = (pais_vis_manual or "").strip() or comun_limpio or consultar_pais_equipo(vis_limpio)
+    pais_loc = (
+        (pais_local_manual or "").strip()
+        or comun_limpio
+        or consultar_pais_equipo(loc_limpio)
+    )
+    pais_vis = (
+        (pais_vis_manual or "").strip()
+        or comun_limpio
+        or consultar_pais_equipo(vis_limpio)
+    )
 
     if pais_ocr_hint:
         if not pais_loc:
@@ -2088,20 +2103,20 @@ def _calcular_desde_capturas_3(
 reset_id = int(st.session_state.get("uploader_reset_id", 0))
 
 st.title("⚽ Detector de Goles (+2.5 / -2.5)")
-st.caption("3 capturas manuales (partido + 10 últimos del local + 10 últimos del visitante) · Racha + Poisson + EV Winamax.")
+st.caption("Modo prueba 2 capturas (1: Local + cabecera · 2: Visitante + cabecera) · Racha + Poisson + EV Winamax.")
 
 tab_poisson, tab_lote, tab_detector, tab_registro = st.tabs(
     ["Análisis Poisson", "Evaluador rápido", "Detector (+2.5 / -2.5)", "Registro de análisis"]
 )
 
 with tab_poisson:
-    st.subheader("Análisis con 3 capturas manuales")
+    st.subheader("Prueba con 2 capturas")
     st.caption(
-        "Sube: 1) captura del partido, 2) últimos 10 partidos del local y 3) últimos 10 partidos del visitante."
+        "Sube solo 2 capturas: 1) partido + 10 últimos del Local y 2) partido + 10 últimos del Visitante."
     )
 
     col_top_l, col_top_r = st.columns([3.5, 1.2])
-    col_top_l.markdown("**Paso 1 · Captura del partido**")
+    col_top_l.markdown("**Captura 1 · Partido y últimos 10 del Equipo Local**")
     col_top_r.button(
         "🧹 Limpiar",
         key="btn_clear_goal",
@@ -2116,48 +2131,88 @@ with tab_poisson:
         key="goal_ocr_psm",
     )
 
-    archivo_partido = st.file_uploader(
-        "1. Captura del partido a analizar",
+    archivo_cap1 = st.file_uploader(
+        "1. Captura Local (cabecera + últimos 10 partidos Local)",
         type=["png", "jpg", "jpeg", "webp"],
-        key=f"ocr_partido_uploader_{reset_id}",
+        key=f"ocr_cap1_uploader_{reset_id}",
     )
-    if archivo_partido is not None:
-        img_p_bytes = archivo_partido.getvalue()
-        img_p = Image.open(BytesIO(img_p_bytes))
+    if archivo_cap1 is not None:
+        img_1_bytes = archivo_cap1.getvalue()
+        img_1 = Image.open(BytesIO(img_1_bytes))
         st.image(
-            img_p,
-            caption=f"1. Partido ({img_p.width}x{img_p.height} px)",
+            img_1,
+            caption=f"1. Local ({img_1.width}x{img_1.height} px)",
             width="stretch",
         )
         try:
-            txt_p = ejecutar_ocr_bytes(img_p_bytes, psm=psm_goal)
-            loc_ocr, vis_ocr = sugerir_equipos_candidatos(txt_p)
-            pais_p = detectar_pais_en_ocr(txt_p)
-            marca_p = f"{archivo_partido.file_id}_{psm_goal}"
-            if st.session_state.get("ultimo_ocr_partido_file") != marca_p:
-                if loc_ocr:
+            txt_1, pares_1 = extraer_marcadores_desde_imagen(img_1_bytes, psm_preferido=psm_goal)
+            loc_ocr, vis_ocr = sugerir_equipos_candidatos(txt_1)
+            pais_1 = detectar_pais_en_ocr(txt_1)
+            marca_1 = f"{archivo_cap1.file_id}_{psm_goal}"
+            if st.session_state.get("ultimo_ocr_cap1_file") != marca_1:
+                if loc_ocr and not st.session_state.get("goal_home_input", "").strip():
                     st.session_state["goal_home_input"] = loc_ocr
-                if vis_ocr:
+                if vis_ocr and not st.session_state.get("goal_away_input", "").strip():
                     st.session_state["goal_away_input"] = vis_ocr
-                if pais_p:
-                    st.session_state["pais_ocr_detectado"] = pais_p
+                if pais_1:
+                    st.session_state["pais_ocr_detectado"] = pais_1
                     if not st.session_state.get("goal_pais_comun_input", "").strip():
-                        st.session_state["goal_pais_comun_input"] = pais_p
-                    if loc_ocr:
-                        guardar_equipo_pais(loc_ocr, pais_p)
-                    if vis_ocr:
-                        guardar_equipo_pais(vis_ocr, pais_p)
-                pais_l_cache = consultar_pais_equipo(loc_ocr) or pais_p
-                pais_v_cache = consultar_pais_equipo(vis_ocr) or pais_p
-                if pais_l_cache and not st.session_state.get("goal_home_country_input", "").strip():
-                    st.session_state["goal_home_country_input"] = pais_l_cache
-                if pais_v_cache and not st.session_state.get("goal_away_country_input", "").strip():
-                    st.session_state["goal_away_country_input"] = pais_v_cache
-                st.session_state["ultimo_ocr_partido_file"] = marca_p
-            with st.expander("Ver texto OCR — Captura 1 (Partido)"):
-                st.text(txt_p if txt_p.strip() else "No se detectó texto.")
+                        st.session_state["goal_pais_comun_input"] = pais_1
+                st.session_state["marcadores_local_10_txt"] = ", ".join(
+                    f"{a}-{b}" for a, b in pares_1
+                )
+                st.session_state["ultimo_ocr_cap1_file"] = marca_1
+            with st.expander("Ver texto OCR — Captura 1 (Local)"):
+                st.text(txt_1 if txt_1.strip() else "No se detectó texto.")
         except Exception as exc:
-            st.error(f"Error al leer captura del partido: {exc}")
+            st.error(f"Error al leer Captura 1: {exc}")
+
+    st.text_area(
+        "Marcadores Local (puedes corregir o escribir a mano, ej.: 0-1, 0-0, 2-4)",
+        height=72,
+        key="marcadores_local_10_txt",
+    )
+
+    st.markdown("**Captura 2 · Partido y últimos 10 del Equipo Visitante**")
+    archivo_cap2 = st.file_uploader(
+        "2. Captura Visitante (cabecera + últimos 10 partidos Visitante)",
+        type=["png", "jpg", "jpeg", "webp"],
+        key=f"ocr_cap2_uploader_{reset_id}",
+    )
+    if archivo_cap2 is not None:
+        img_2_bytes = archivo_cap2.getvalue()
+        img_2 = Image.open(BytesIO(img_2_bytes))
+        st.image(
+            img_2,
+            caption=f"2. Visitante ({img_2.width}x{img_2.height} px)",
+            width="stretch",
+        )
+        try:
+            txt_2, pares_2 = extraer_marcadores_desde_imagen(img_2_bytes, psm_preferido=psm_goal)
+            loc_ocr_2, vis_ocr_2 = sugerir_equipos_candidatos(txt_2)
+            pais_2 = detectar_pais_en_ocr(txt_2)
+            marca_2 = f"{archivo_cap2.file_id}_{psm_goal}"
+            if st.session_state.get("ultimo_ocr_cap2_file") != marca_2:
+                if loc_ocr_2 and not st.session_state.get("goal_home_input", "").strip():
+                    st.session_state["goal_home_input"] = loc_ocr_2
+                if vis_ocr_2 and not st.session_state.get("goal_away_input", "").strip():
+                    st.session_state["goal_away_input"] = vis_ocr_2
+                if pais_2 and not st.session_state.get("goal_pais_comun_input", "").strip():
+                    st.session_state["goal_pais_comun_input"] = pais_2
+                st.session_state["marcadores_vis_10_txt"] = ", ".join(
+                    f"{a}-{b}" for a, b in pares_2
+                )
+                st.session_state["ultimo_ocr_cap2_file"] = marca_2
+            with st.expander("Ver texto OCR — Captura 2 (Visitante)"):
+                st.text(txt_2 if txt_2.strip() else "No se detectó texto.")
+        except Exception as exc:
+            st.error(f"Error al leer Captura 2: {exc}")
+
+    st.text_area(
+        "Marcadores Visitante (puedes corregir o escribir a mano, ej.: 1-2, 0-0, 2-2)",
+        height=72,
+        key="marcadores_vis_10_txt",
+    )
 
     gc1, gc2 = st.columns(2)
     g_home_input = gc1.text_input("Equipo Local", key="goal_home_input")
@@ -2173,21 +2228,21 @@ with tab_poisson:
             st.session_state["goal_away_country_input"] = pais_auto_v
 
     with st.container(border=True):
-        st.markdown("**🌍 País de los equipos de la captura**")
+        st.markdown("**🌍 País de los equipos**")
         g_pais_comun = st.text_input(
             "País común (si ambos juegan en el mismo país)",
-            placeholder="Ej.: Egipto, España, Kenia, Nicaragua...",
+            placeholder="Ej.: Uzbekistán, Egipto, España...",
             key="goal_pais_comun_input",
         )
         pc1, pc2 = st.columns(2)
         g_home_country = pc1.text_input(
             "País del Equipo Local",
-            placeholder="Ej.: Egipto",
+            placeholder="Ej.: Uzbekistán",
             key="goal_home_country_input",
         )
         g_away_country = pc2.text_input(
             "País del Equipo Visitante",
-            placeholder="Ej.: Egipto",
+            placeholder="Ej.: Uzbekistán",
             key="goal_away_country_input",
         )
 
@@ -2210,100 +2265,6 @@ with tab_poisson:
             st.success(status_pais[3:])
         elif status_pais.startswith("warn:"):
             st.warning(status_pais[5:])
-
-    pais_l_preview = (
-        g_home_country.strip()
-        or g_pais_comun.strip()
-        or consultar_pais_equipo(g_home_input)
-    )
-    pais_v_preview = (
-        g_away_country.strip()
-        or g_pais_comun.strip()
-        or consultar_pais_equipo(g_away_input)
-    )
-    if g_home_input.strip() or g_away_input.strip():
-        etq_l = f"**{g_home_input or 'Local'}** (`{pais_l_preview or 'Sin país'}`)"
-        etq_v = f"**{g_away_input or 'Visitante'}** (`{pais_v_preview or 'Sin país'}`)"
-        if (
-            pais_l_preview
-            and pais_v_preview
-            and normalizar_texto(pais_l_preview) == normalizar_texto(pais_v_preview)
-        ):
-            st.caption(f"🌍 Verificación: {etq_l} vs {etq_v} · ✅ Ambos de **{pais_l_preview}**")
-        else:
-            st.caption(f"🌍 Verificación: {etq_l} vs {etq_v}")
-
-    st.markdown("**Paso 2 · Captura de los últimos 10 partidos del Equipo Local**")
-    archivo_local_10 = st.file_uploader(
-        "2. Últimos 10 partidos — Local",
-        type=["png", "jpg", "jpeg", "webp"],
-        key=f"ocr_local_10_uploader_{reset_id}",
-    )
-    if archivo_local_10 is not None:
-        img_l_bytes = archivo_local_10.getvalue()
-        img_l = Image.open(BytesIO(img_l_bytes))
-        st.image(
-            img_l,
-            caption=f"2. Últimos 10 Local ({img_l.width}x{img_l.height} px)",
-            width="stretch",
-        )
-        try:
-            txt_l, pares_l = extraer_marcadores_desde_imagen(img_l_bytes, psm_preferido=psm_goal)
-            pais_l_ocr = detectar_pais_en_ocr(txt_l)
-            if pais_l_ocr and g_home_input.strip():
-                guardar_equipo_pais(g_home_input, pais_l_ocr)
-            marca_l = f"{archivo_local_10.file_id}_{psm_goal}"
-            if st.session_state.get("ultimo_ocr_local_10_file") != marca_l:
-                st.session_state["marcadores_local_10_txt"] = ", ".join(
-                    f"{a}-{b}" for a, b in pares_l
-                )
-                st.session_state["ultimo_ocr_local_10_file"] = marca_l
-            with st.expander("Ver texto OCR — Captura 2 (10 últimos Local)"):
-                st.text(txt_l if txt_l.strip() else "No se detectó texto.")
-        except Exception as exc:
-            st.error(f"Error al leer captura del local: {exc}")
-
-    st.text_area(
-        "Marcadores detectados Local (puedes corregir o escribir a mano, ej.: 1-0, 2-1, 0-0)",
-        height=72,
-        key="marcadores_local_10_txt",
-    )
-
-    st.markdown("**Paso 3 · Captura de los últimos 10 partidos del Equipo Visitante**")
-    archivo_vis_10 = st.file_uploader(
-        "3. Últimos 10 partidos — Visitante",
-        type=["png", "jpg", "jpeg", "webp"],
-        key=f"ocr_vis_10_uploader_{reset_id}",
-    )
-    if archivo_vis_10 is not None:
-        img_v_bytes = archivo_vis_10.getvalue()
-        img_v = Image.open(BytesIO(img_v_bytes))
-        st.image(
-            img_v,
-            caption=f"3. Últimos 10 Visitante ({img_v.width}x{img_v.height} px)",
-            width="stretch",
-        )
-        try:
-            txt_v, pares_v = extraer_marcadores_desde_imagen(img_v_bytes, psm_preferido=psm_goal)
-            pais_v_ocr = detectar_pais_en_ocr(txt_v)
-            if pais_v_ocr and g_away_input.strip():
-                guardar_equipo_pais(g_away_input, pais_v_ocr)
-            marca_v = f"{archivo_vis_10.file_id}_{psm_goal}"
-            if st.session_state.get("ultimo_ocr_vis_10_file") != marca_v:
-                st.session_state["marcadores_vis_10_txt"] = ", ".join(
-                    f"{a}-{b}" for a, b in pares_v
-                )
-                st.session_state["ultimo_ocr_vis_10_file"] = marca_v
-            with st.expander("Ver texto OCR — Captura 3 (10 últimos Visitante)"):
-                st.text(txt_v if txt_v.strip() else "No se detectó texto.")
-        except Exception as exc:
-            st.error(f"Error al leer captura del visitante: {exc}")
-
-    st.text_area(
-        "Marcadores detectados Visitante (puedes corregir o escribir a mano, ej.: 0-1, 1-1, 2-0)",
-        height=72,
-        key="marcadores_vis_10_txt",
-    )
 
     with st.container(border=True):
         st.markdown("**💶 Cuotas en Winamax (+2.5 / -2.5) y nota**")
@@ -2356,7 +2317,7 @@ with tab_poisson:
         )
 
     if st.button(
-        "Calcular pronóstico desde las 3 capturas",
+        "Calcular pronóstico desde las 2 capturas",
         type="primary",
         key="btn_calc_goal_poisson",
         width="stretch",
@@ -2370,10 +2331,10 @@ with tab_poisson:
             )
             if not pares_loc or not pares_vis:
                 st.error(
-                    "Necesitas marcadores válidos (formato ej. 1-0, 2-1) en ambos equipos para calcular."
+                    "Necesitas marcadores válidos (formato ej. 0-1, 2-4) en ambos equipos para calcular."
                 )
             else:
-                res_g = _calcular_desde_capturas_3(
+                res_g = _calcular_desde_capturas_2(
                     home_nombre=g_home_input,
                     away_nombre=g_away_input,
                     marcadores_l=pares_loc,
