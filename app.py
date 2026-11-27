@@ -1,3 +1,4 @@
+
 import json
 import math
 import os
@@ -84,6 +85,10 @@ PAISES_BASE_INICIALES = {
     "sao paulo": "Brasil",
     "sao paulo fc": "Brasil",
     "remo": "Brasil",
+    "atletico go": "Brasil",
+    "atletico-go": "Brasil",
+    "atletico goianiense": "Brasil",
+    "vila nova": "Brasil",
     "kokand 1912": "Uzbekistán",
     "xorazm urganch": "Uzbekistán",
 }
@@ -179,6 +184,9 @@ KNOWN_GOAL_TEAMS = {
 }
 
 ALIAS_EQUIPOS = {
+    "atletico go": "Atletico Goianiense",
+    "atletico-go": "Atletico Goianiense",
+    "atletico goianiense": "Atletico Goianiense",
     "marsella": "Marseille",
     "olympique marsella": "Marseille",
     "olympique de marsella": "Marseille",
@@ -421,6 +429,16 @@ def preparar_nombre_busqueda(nombre: str) -> str:
     return nombre.strip()
 
 
+def _coincide_pais(pais_candidato: str, pais_objetivo: str | None) -> bool:
+    if not pais_objetivo or not pais_objetivo.strip():
+        return True
+    p_cand = normalizar_texto(pais_candidato or "")
+    p_obj = normalizar_texto(pais_objetivo)
+    if not p_cand:
+        return False
+    return p_obj in p_cand or p_cand in p_obj
+
+
 def obtener_api_key(key_manual: str) -> str:
     if key_manual and key_manual.strip():
         return key_manual.strip()
@@ -554,7 +572,7 @@ def _fecha_partido(fixture_item: dict) -> str:
     return str(fixture_item.get("fixture", {}).get("date") or "")
 
 
-def buscar_equipo_api(nombre: str, api_key: str) -> dict | None:
+def buscar_equipo_api(nombre: str, api_key: str, pais: str | None = None) -> dict | None:
     consulta = preparar_nombre_busqueda(nombre)
     data = api_get("teams", (("search", consulta),), api_key)
     errores = data.get("errors")
@@ -571,6 +589,16 @@ def buscar_equipo_api(nombre: str, api_key: str) -> dict | None:
 
     if not resultados:
         return None
+
+    if pais and pais.strip():
+        filtrados = [
+            item
+            for item in resultados
+            if _coincide_pais(str((item.get("venue") or {}).get("country") or ""), pais)
+        ]
+        if not filtrados:
+            return None
+        resultados = filtrados
 
     objetivo = normalizar_texto(consulta)
     for item in resultados:
@@ -691,26 +719,27 @@ def goal_search_teams_cached(query: str, country: str | None, goal_key: str) -> 
             break
 
     if country and country.strip():
-        c_norm = normalizar_texto(country)
         filtrados = [
             t
             for t in items
-            if c_norm in normalizar_texto(str(t.get("country") or t.get("countryName") or ""))
+            if _coincide_pais(str(t.get("country") or t.get("countryName") or ""), country)
         ]
-        if filtrados:
-            return filtrados
+        return filtrados
 
     return items
 
 
 def goal_resolve_team(name: str, country: str | None, goal_key: str) -> dict | None:
-    clave_norm = normalizar_texto(name)
+    consulta = preparar_nombre_busqueda(name)
+    clave_norm = normalizar_texto(consulta)
     if clave_norm in KNOWN_GOAL_TEAMS:
-        return KNOWN_GOAL_TEAMS[clave_norm]
+        known = KNOWN_GOAL_TEAMS[clave_norm]
+        if _coincide_pais(str(known.get("country") or ""), country):
+            return known
 
-    candidates = goal_search_teams_cached(name, country, goal_key)
-    if not candidates and country:
-        candidates = goal_search_teams_cached(name, None, goal_key)
+    candidates = goal_search_teams_cached(consulta, country, goal_key)
+    if not candidates and consulta != name.strip():
+        candidates = goal_search_teams_cached(name.strip(), country, goal_key)
 
     if not candidates:
         return None
@@ -1285,13 +1314,13 @@ def main() -> None:
     with col_eq1:
         local_nombre = st.text_input(
             "Equipo Local",
-            placeholder="Ej: Independiente",
+            placeholder="Ej: Vila Nova",
             key=f"local_nombre_{nonce}",
         )
     with col_eq2:
         visitante_nombre = st.text_input(
             "Equipo Visitante",
-            placeholder="Ej: Real Oruro",
+            placeholder="Ej: Atlético-GO",
             key=f"visitante_nombre_{nonce}",
         )
     with col_pais:
@@ -1299,7 +1328,7 @@ def main() -> None:
         pais_partido = st.text_input(
             "País",
             value=pais_defecto,
-            placeholder="Ej: Bolivia",
+            placeholder="Ej: Brasil",
             key=f"pais_partido_{nonce}",
         )
 
@@ -1378,8 +1407,10 @@ def main() -> None:
 
         home_stats = None
         away_stats = None
-        nombre_local_final = local_nombre.strip()
-        nombre_vis_final = visitante_nombre.strip()
+        nombre_local_input = local_nombre.strip()
+        nombre_vis_input = visitante_nombre.strip()
+        nombre_local_final = nombre_local_input
+        nombre_vis_final = nombre_vis_input
 
         try:
             if fuente_datos == "Goal API":
@@ -1387,13 +1418,15 @@ def main() -> None:
                 if not g_key:
                     st.error("Falta configurar GOAL_KEY en la barra lateral o en secrets.")
                     return
-                t_home = goal_resolve_team(nombre_local_final, pais_partido or None, g_key)
-                t_away = goal_resolve_team(nombre_vis_final, pais_partido or None, g_key)
+                t_home = goal_resolve_team(nombre_local_input, pais_partido or None, g_key)
+                t_away = goal_resolve_team(nombre_vis_input, pais_partido or None, g_key)
                 if not t_home or not t_away:
-                    st.error("No se encontró alguno de los equipos en Goal API.")
+                    st.error(
+                        "No se encontró alguno de los equipos en Goal API con el país indicado."
+                    )
                     return
-                nombre_local_final = t_home.get("name", nombre_local_final)
-                nombre_vis_final = t_away.get("name", nombre_vis_final)
+                nombre_local_final = t_home.get("name", nombre_local_input)
+                nombre_vis_final = t_away.get("name", nombre_vis_input)
                 res_h = goal_fetch_team_results(t_home["id"], g_key)
                 res_a = goal_fetch_team_results(t_away["id"], g_key)
                 sum_h = goal_summarize_team_goals(res_h, t_home["id"], last_n=10, prefer_venue="home")
@@ -1418,13 +1451,15 @@ def main() -> None:
                 if not a_key:
                     st.error("Falta configurar API_FOOTBALL_KEY en la barra lateral o en secrets.")
                     return
-                t_home = buscar_equipo_api(nombre_local_final, a_key)
-                t_away = buscar_equipo_api(nombre_vis_final, a_key)
+                t_home = buscar_equipo_api(nombre_local_input, a_key, pais_partido or None)
+                t_away = buscar_equipo_api(nombre_vis_input, a_key, pais_partido or None)
                 if not t_home or not t_away:
-                    st.error("No se encontró alguno de los equipos en API-Football.")
+                    st.error(
+                        "No se encontró alguno de los equipos en API-Football con el país indicado."
+                    )
                     return
-                nombre_local_final = t_home.get("name", nombre_local_final)
-                nombre_vis_final = t_away.get("name", nombre_vis_final)
+                nombre_local_final = t_home.get("name", nombre_local_input)
+                nombre_vis_final = t_away.get("name", nombre_vis_input)
                 home_stats = obtener_promedios_10_api(t_home["id"], a_key)
                 away_stats = obtener_promedios_10_api(t_away["id"], a_key)
 
@@ -1493,6 +1528,8 @@ def main() -> None:
         )
 
         st.session_state["ultimo_analisis"] = {
+            "nombre_local_input": nombre_local_input,
+            "nombre_vis_input": nombre_vis_input,
             "nombre_local_final": nombre_local_final,
             "nombre_vis_final": nombre_vis_final,
             "n_home": n_home,
@@ -1508,6 +1545,8 @@ def main() -> None:
 
     analisis = st.session_state.get("ultimo_analisis")
     if analisis:
+        nombre_local_input = analisis.get("nombre_local_input", "")
+        nombre_vis_input = analisis.get("nombre_vis_input", "")
         nombre_local_final = analisis["nombre_local_final"]
         nombre_vis_final = analisis["nombre_vis_final"]
         n_home = analisis["n_home"]
@@ -1519,6 +1558,19 @@ def main() -> None:
         pronostico = analisis["pronostico"]
         cuota_o25 = analisis["cuota_o25"]
         cuota_u25 = analisis["cuota_u25"]
+
+        if nombre_local_input and normalizar_texto(nombre_local_input) not in normalizar_texto(
+            nombre_local_final
+        ):
+            st.warning(
+                f"Revisa el equipo local: escribiste '{nombre_local_input}' y se resolvió como '{nombre_local_final}'."
+            )
+        if nombre_vis_input and normalizar_texto(nombre_vis_input) not in normalizar_texto(
+            nombre_vis_final
+        ):
+            st.warning(
+                f"Revisa el equipo visitante: escribiste '{nombre_vis_input}' y se resolvió como '{nombre_vis_final}'."
+            )
 
         if n_home < 10:
             st.warning(f"{nombre_local_final}: se detectaron {n_home} marcadores (ideal: 10).")
