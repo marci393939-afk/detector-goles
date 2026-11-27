@@ -679,12 +679,16 @@ def main() -> None:
             type=["png", "jpg", "jpeg"],
             key=f"img_local_{nonce}",
         )
+        if img_local is not None:
+            st.image(img_local, caption="Vista previa Local", use_container_width=True)
     with c_img2:
         img_vis = st.file_uploader(
             "Captura VISITANTE (equipo + 10 últimos partidos)",
             type=["png", "jpg", "jpeg"],
             key=f"img_vis_{nonce}",
         )
+        if img_vis is not None:
+            st.image(img_vis, caption="Vista previa Visitante", use_container_width=True)
 
     st.markdown("#### 2. Nombres de equipos y cuotas de Winamax")
     col_eq1, col_eq2 = st.columns(2)
@@ -759,17 +763,21 @@ def main() -> None:
         m_vis_ocr: list[tuple[int, int]] = []
         eq_loc_ocr = ""
         eq_vis_ocr = ""
+        texto_ocr_loc = ""
+        texto_ocr_vis = ""
 
         try:
             if img_local is not None:
                 ocr_l = extraer_datos_desde_imagen(Image.open(BytesIO(img_local.getvalue())))
                 m_loc_ocr = ocr_l["marcadores"]
                 eq_loc_ocr = ocr_l["equipo_detectado"]
+                texto_ocr_loc = ocr_l["texto"]
 
             if img_vis is not None:
                 ocr_v = extraer_datos_desde_imagen(Image.open(BytesIO(img_vis.getvalue())))
                 m_vis_ocr = ocr_v["marcadores"]
                 eq_vis_ocr = ocr_v["equipo_detectado"]
+                texto_ocr_vis = ocr_v["texto"]
         except Exception as exc:
             st.error(f"Error leyendo las capturas OCR: {exc}")
             return
@@ -785,8 +793,14 @@ def main() -> None:
 
         if not home_stats or not away_stats:
             st.error(
-                "Sube las capturas de Local y Visitante (o introduce los marcadores manualmente) para calcular el partido."
+                "No se pudieron extraer marcadores de las capturas. Revisa abajo lo que leyó el OCR o escribe los marcadores manualmente."
             )
+            if texto_ocr_loc:
+                with st.expander("Texto leído por OCR en captura Local", expanded=True):
+                    st.code(texto_ocr_loc.strip() or "(vacío)")
+            if texto_ocr_vis:
+                with st.expander("Texto leído por OCR en captura Visitante", expanded=True):
+                    st.code(texto_ocr_vis.strip() or "(vacío)")
             return
 
         n_home = int(home_stats.get("partidos", 0))
