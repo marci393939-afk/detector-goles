@@ -400,6 +400,26 @@ def preparar_imagen_ocr(imagen: Image.Image) -> Image.Image:
     return gris
 
 
+def recortar_franja_marcadores(imagen: Image.Image) -> Image.Image:
+    """Recorta la columna derecha de marcadores (x: 78%-100%, y: 7%-100%) para leer los 10 goles."""
+    img = imagen.convert("RGB")
+    w, h = img.size
+    left = int(w * 0.78)
+    top = int(h * 0.07)
+    recorte = img.crop((left, top, w, h))
+    rw, rh = recorte.size
+    if max(rw, rh) < 1800:
+        escala = 1800 / max(rw, rh)
+        recorte = recorte.resize(
+            (max(1, int(rw * escala)), max(1, int(rh * escala))),
+            Image.Resampling.LANCZOS,
+        )
+    gris = ImageOps.grayscale(recorte)
+    gris = ImageEnhance.Contrast(gris).enhance(1.8)
+    gris = ImageEnhance.Sharpness(gris).enhance(1.6)
+    return gris
+
+
 @st.cache_data(show_spinner=False)
 def ejecutar_ocr_bytes(img_bytes: bytes, psm: int = 6) -> str:
     imagen = Image.open(BytesIO(img_bytes))
@@ -408,14 +428,29 @@ def ejecutar_ocr_bytes(img_bytes: bytes, psm: int = 6) -> str:
     return pytesseract.image_to_string(procesada, lang="spa+eng", config=config)
 
 
-def extraer_resultados_captura(texto_ocr: str) -> dict:
-    if not texto_ocr or not texto_ocr.strip():
-        return {"marcadores": [], "total": 0, "pct_over": None, "pct_under": None}
+@st.cache_data(show_spinner=False)
+def ejecutar_ocr_franja_marcadores(img_bytes: bytes) -> str:
+    imagen = Image.open(BytesIO(img_bytes))
+    franja = recortar_franja_marcadores(imagen)
+    texto_6 = pytesseract.image_to_string(
+        franja, lang="eng", config="--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789-–:\n "
+    )
+    if len(re.findall(r"\b\d{1,2}\b", texto_6)) >= 14:
+        return texto_6
+    texto_4 = pytesseract.image_to_string(
+        franja, lang="eng", config="--oem 3 --psm 4 -c tessedit_char_whitelist=0123456789-–:\n "
+    )
+    return texto_4 if len(re.findall(r"\b\d{1,2}\b", texto_4)) > len(re.findall(r"\b\d{1,2}\b", texto_6)) else texto_6
+
+
+def _extraer_parejas_de_texto(texto: str) -> list[tuple[int, int]]:
+    if not texto or not texto.strip():
+        return []
 
     marcadores: list[tuple[int, int]] = []
     goles_sueltos: list[int] = []
 
-    for linea in texto_ocr.splitlines():
+    for linea in texto.splitlines():
         l_limpia = linea.strip()
         if not l_limpia:
             continue
@@ -437,14 +472,28 @@ def extraer_resultados_captura(texto_ocr: str) -> dict:
                     marcadores.append((g1, g2))
             continue
 
-        m_solitario = re.search(r"(?:^|\s)(\d{1,2})$", l_limpia)
-        if m_solitario:
-            val = int(m_solitario.group(1))
+        for tok in re.findall(r"\b\d{1,2}\b", l_limpia):
+            val = int(tok)
             if val <= 12:
                 goles_sueltos.append(val)
                 if len(goles_sueltos) == 2:
                     marcadores.append((goles_sueltos[0], goles_sueltos[1]))
                     goles_sueltos.clear()
+
+    return marcadores[:10]
+
+
+def extraer_resultados_captura(texto_ocr: str, texto_franja: str = "") -> dict:
+    parejas_franja = _extraer_parejas_de_texto(texto_franja)
+    parejas_full = _extraer_parejas_de_texto(texto_ocr)
+
+    # Prioriza la franja derecha recortada cuando detecta al menos tantos partidos como la captura entera
+    if len(parejas_franja) >= max(len(parejas_full), 6):
+        marcadores = parejas_franja
+    elif len(parejas_full) >= len(parejas_franja):
+        marcadores = parejas_full
+    else:
+        marcadores = parejas_franja
 
     total = len(marcadores)
     if total == 0:
@@ -1191,6 +1240,8 @@ with st.expander("Ajustes de API-Football, OCR y filtros"):
 
 texto_ocr_1 = ""
 texto_ocr_2 = ""
+texto_franja_1 = ""
+texto_franja_2 = ""
 ocr_res_1: dict = {"marcadores": [], "total": 0, "pct_over": None, "pct_under": None}
 ocr_res_2: dict = {"marcadores": [], "total": 0, "pct_over": None, "pct_under": None}
 local_sugerido = ""
@@ -1209,7 +1260,8 @@ if archivo_local is not None or archivo_visitante is not None:
             )
             try:
                 texto_ocr_1 = ejecutar_ocr_bytes(archivo_local.getvalue(), psm=psm)
-                ocr_res_1 = extraer_resultados_captura(texto_ocr_1)
+                texto_franja_1 = ejecutar_ocr_franja_marcadores(archivo_local.getvalue())
+                ocr_res_1 = extraer_resultados_captura(texto_ocr_1, texto_franja_1)
             except Exception as exc:
                 st.error(f"Error OCR en Captura 1: {exc}")
     with prev_cols[1]:
@@ -1222,7 +1274,8 @@ if archivo_local is not None or archivo_visitante is not None:
             )
             try:
                 texto_ocr_2 = ejecutar_ocr_bytes(archivo_visitante.getvalue(), psm=psm)
-                ocr_res_2 = extraer_resultados_captura(texto_ocr_2)
+                texto_franja_2 = ejecutar_ocr_franja_marcadores(archivo_visitante.getvalue())
+                ocr_res_2 = extraer_resultados_captura(texto_ocr_2, texto_franja_2)
             except Exception as exc:
                 st.error(f"Error OCR en Captura 2: {exc}")
 
@@ -1240,7 +1293,7 @@ if archivo_local is not None or archivo_visitante is not None:
             f"**{ocr_res_2['pct_over']:.0f}% de +2.5 goles** y **{ocr_res_2['pct_under']:.0f}% de -2.5 goles**"
         )
 
-    firma_ocr = f"{nonce}_{texto_ocr_1}_{texto_ocr_2}"
+    firma_ocr = f"{nonce}_{texto_ocr_1}_{texto_ocr_2}_{texto_franja_1}_{texto_franja_2}"
     if st.session_state.get("ultimo_ocr_pct_sync") != firma_ocr:
         if ocr_res_1.get("total", 0) >= 3 and ocr_res_1.get("pct_over") is not None:
             st.session_state[f"pct_over_local_10_{nonce}"] = float(ocr_res_1["pct_over"])
@@ -1257,9 +1310,15 @@ if archivo_local is not None or archivo_visitante is not None:
         if texto_ocr_1.strip():
             st.markdown("**Captura 1:**")
             st.text(texto_ocr_1)
+        if texto_franja_1.strip():
+            st.markdown("**Franja marcadores Captura 1:**")
+            st.text(texto_franja_1)
         if texto_ocr_2.strip():
             st.markdown("**Captura 2:**")
             st.text(texto_ocr_2)
+        if texto_franja_2.strip():
+            st.markdown("**Franja marcadores Captura 2:**")
+            st.text(texto_franja_2)
         if not texto_ocr_combinado.strip():
             st.text("No se detectó texto.")
 
