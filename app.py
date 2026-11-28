@@ -17,32 +17,33 @@ st.set_page_config(
 
 API_BASE_URL = "https://v3.football.api-sports.io"
 
-# Factor de ajuste de goles esperados por país/región (1.00 = neutro)
-FACTOR_PAIS = {
-    "España": 0.98,
-    "Inglaterra": 1.03,
-    "Alemania": 1.05,
-    "Italia": 0.96,
-    "Francia": 1.00,
-    "Portugal": 1.00,
-    "Países Bajos": 1.05,
-    "Bélgica": 1.02,
-    "Colombia": 0.95,
-    "Argentina": 0.94,
-    "Brasil": 0.96,
-    "Venezuela": 0.95,
-    "Chile": 0.98,
-    "Perú": 0.97,
-    "Uruguay": 0.95,
-    "México": 0.99,
-    "Estados Unidos": 1.03,
-    "Japón": 0.99,
-    "Corea del Sur": 0.97,
-    "Australia": 1.03,
-    "Otro / General": 1.00,
+# Factor de ajuste de goles esperados por país normalizado (1.00 = neutro)
+FACTOR_PAIS_NORM = {
+    "espana": 0.98,
+    "inglaterra": 1.03,
+    "alemania": 1.05,
+    "italia": 0.96,
+    "francia": 1.00,
+    "portugal": 1.00,
+    "paises bajos": 1.05,
+    "holanda": 1.05,
+    "belgica": 1.02,
+    "colombia": 0.95,
+    "argentina": 0.94,
+    "brasil": 0.96,
+    "venezuela": 0.95,
+    "chile": 0.98,
+    "peru": 0.97,
+    "uruguay": 0.95,
+    "mexico": 0.99,
+    "estados unidos": 1.03,
+    "eeuu": 1.03,
+    "japon": 0.99,
+    "corea del sur": 0.97,
+    "australia": 1.03,
+    "macedonia del norte": 0.97,
+    "otro / general": 1.00,
 }
-
-PAISES_DISPONIBLES = list(FACTOR_PAIS.keys())
 
 ALIAS_EQUIPOS = {
     "marsella": "Marseille",
@@ -139,8 +140,8 @@ PALABRAS_RUIDO = {
 }
 
 VALORES_POR_DEFECTO = {
-    "pais_local": "Otro / General",
-    "pais_visitante": "Otro / General",
+    "pais_local_txt": "",
+    "pais_visitante_txt": "",
     "gf_local_10": 1.30,
     "gc_local_10": 1.05,
     "gf_vis_10": 1.15,
@@ -172,6 +173,13 @@ def normalizar_texto(texto: str) -> str:
         c for c in unicodedata.normalize("NFD", texto) if unicodedata.category(c) != "Mn"
     )
     return re.sub(r"\s+", " ", sin_tildes).strip().lower()
+
+
+def obtener_factor_pais(pais: str) -> float:
+    clave = normalizar_texto(pais or "")
+    if not clave:
+        return 1.0
+    return FACTOR_PAIS_NORM.get(clave, 1.0)
 
 
 def preparar_nombre_busqueda(nombre: str) -> str:
@@ -213,9 +221,10 @@ def _fecha_partido(fixture_item: dict) -> str:
 
 def buscar_equipo_api(nombre: str, api_key: str, pais_filtro: str | None = None) -> dict | None:
     consulta = preparar_nombre_busqueda(nombre)
+    pais_limpio = (pais_filtro or "").strip()
     params_base: list[tuple[str, str]] = [("search", consulta)]
-    if pais_filtro and pais_filtro != "Otro / General":
-        params_base.append(("country", pais_filtro))
+    if pais_limpio and normalizar_texto(pais_limpio) not in {"otro", "otro / general", "general"}:
+        params_base.append(("country", pais_limpio))
 
     data = api_get("teams", tuple(params_base), api_key)
     errores = data.get("errors")
@@ -223,7 +232,7 @@ def buscar_equipo_api(nombre: str, api_key: str, pais_filtro: str | None = None)
         raise RuntimeError(str(errores))
 
     resultados = data.get("response", [])
-    if not resultados and pais_filtro and pais_filtro != "Otro / General":
+    if not resultados and len(params_base) > 1:
         data = api_get("teams", (("search", consulta),), api_key)
         errores = data.get("errors")
         if errores:
@@ -500,8 +509,8 @@ def calcular_xg_moderado(
     gf_vis_10: float,
     gc_vis_10: float,
     goles_h2h_prom: float | None = None,
-    pais_local: str = "Otro / General",
-    pais_visitante: str = "Otro / General",
+    pais_local: str = "",
+    pais_visitante: str = "",
     cuota_empate: float | None = None,
     peso_h2h: float = 0.12,
     factor_localia: float = 0.06,
@@ -518,8 +527,8 @@ def calcular_xg_moderado(
     xg_local = ((gf_l + gc_v) / 2.0) * (1.0 + factor_localia)
     xg_visitante = ((gf_v + gc_l) / 2.0) * (1.0 - factor_localia)
 
-    fac_pais_l = FACTOR_PAIS.get(pais_local, 1.0)
-    fac_pais_v = FACTOR_PAIS.get(pais_visitante, 1.0)
+    fac_pais_l = obtener_factor_pais(pais_local)
+    fac_pais_v = obtener_factor_pais(pais_visitante)
     fac_pais_medio = (fac_pais_l + fac_pais_v) / 2.0
     xg_local *= fac_pais_medio
     xg_visitante *= fac_pais_medio
@@ -763,8 +772,8 @@ if "reset_nonce" not in st.session_state:
 nonce = st.session_state["reset_nonce"]
 
 CLAVES_DINAMICAS = {
-    "pais_local",
-    "pais_visitante",
+    "pais_local_txt",
+    "pais_visitante_txt",
     "gf_local_10",
     "gc_local_10",
     "gf_vis_10",
@@ -791,8 +800,8 @@ def limpiar_todo_estado() -> None:
     st.session_state["ultimo_auto_fetch"] = ""
     st.session_state[f"equipo_local_input_{nuevo_nonce}"] = ""
     st.session_state[f"equipo_visitante_input_{nuevo_nonce}"] = ""
-    st.session_state[f"pais_local_{nuevo_nonce}"] = VALORES_POR_DEFECTO["pais_local"]
-    st.session_state[f"pais_visitante_{nuevo_nonce}"] = VALORES_POR_DEFECTO["pais_visitante"]
+    st.session_state[f"pais_local_txt_{nuevo_nonce}"] = ""
+    st.session_state[f"pais_visitante_txt_{nuevo_nonce}"] = ""
     st.session_state[f"gf_local_10_{nuevo_nonce}"] = VALORES_POR_DEFECTO["gf_local_10"]
     st.session_state[f"gc_local_10_{nuevo_nonce}"] = VALORES_POR_DEFECTO["gc_local_10"]
     st.session_state[f"gf_vis_10_{nuevo_nonce}"] = VALORES_POR_DEFECTO["gf_vis_10"]
@@ -805,7 +814,7 @@ def limpiar_todo_estado() -> None:
 
 
 st.title("⚽ Detector de Goles (+2.5 / -2.5)")
-st.caption("Dixon-Coles + país y cuota empate (X), 2 capturas OCR, API-Football (v3) y cuotas Winamax.")
+st.caption("Dixon-Coles + país libre y cuota empate (X), 2 capturas OCR, API-Football (v3) y cuotas Winamax.")
 
 st.subheader("1. Capturas de partido y últimos 10 partidos (opcional)")
 cap_col1, cap_col2 = st.columns(2)
@@ -912,10 +921,10 @@ with col1:
         value=local_sugerido,
         key=f"equipo_local_input_{nonce}",
     )
-    pais_local = st.selectbox(
+    pais_local = st.text_input(
         "País Equipo Local",
-        options=PAISES_DISPONIBLES,
-        key=f"pais_local_{nonce}",
+        placeholder="Ej. Macedonia del Norte",
+        key=f"pais_local_txt_{nonce}",
     )
 with col2:
     equipo_visitante = st.text_input(
@@ -923,10 +932,10 @@ with col2:
         value=visitante_sugerido,
         key=f"equipo_visitante_input_{nonce}",
     )
-    pais_visitante = st.selectbox(
+    pais_visitante = st.text_input(
         "País Equipo Visitante",
-        options=PAISES_DISPONIBLES,
-        key=f"pais_visitante_{nonce}",
+        placeholder="Ej. Macedonia del Norte",
+        key=f"pais_visitante_txt_{nonce}",
     )
 
 api_key_activa = obtener_api_key(api_key_input)
@@ -1124,7 +1133,9 @@ resultado_actual = evaluar_entrada_25(
     min_prob_under=min_prob_under_pct / 100.0,
 )
 
-partido_label = f"{equipo_local or 'Local'} ({pais_local}) vs {equipo_visitante or 'Visitante'} ({pais_visitante})"
+label_loc = f"{equipo_local or 'Local'}{f' ({pais_local.strip()})' if pais_local.strip() else ''}"
+label_vis = f"{equipo_visitante or 'Visitante'}{f' ({pais_visitante.strip()})' if pais_visitante.strip() else ''}"
+partido_label = f"{label_loc} vs {label_vis}"
 
 st.divider()
 st.subheader("4. Análisis del modelo")
