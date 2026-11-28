@@ -42,6 +42,7 @@ FACTOR_PAIS_NORM = {
     "corea del sur": 0.97,
     "australia": 1.03,
     "macedonia del norte": 0.97,
+    "polonia": 1.00,
     "otro / general": 1.00,
 }
 
@@ -157,7 +158,21 @@ VALORES_POR_DEFECTO = {
     "api_warn_msg": "",
 }
 
-MARCADORES_COMUNES = ["0-0", "1-0", "0-1", "1-1", "2-0", "0-2", "2-1", "1-2", "2-2", "3-1", "1-3", "3-0", "0-3"]
+MARCADORES_COMUNES = [
+    "0-0",
+    "1-0",
+    "0-1",
+    "1-1",
+    "2-0",
+    "0-2",
+    "2-1",
+    "1-2",
+    "2-2",
+    "3-1",
+    "1-3",
+    "3-0",
+    "0-3",
+]
 
 
 def parsear_cuota(texto: str) -> float | None:
@@ -669,11 +684,24 @@ def analizar_marcadores_exactos(
     marcador_objetivo: str = "1-1",
     cuota_marcador: float | None = None,
 ) -> dict:
-    """Genera top marcadores exactos, marcadores clave y evaluación opcional de cuota exacta."""
+    """Genera top 3 destacados, top 6 marcadores exactos y evaluación opcional de cuota."""
     matriz = matriz_marcadores_dixon_coles(
         xg_local, xg_visitante, cuota_empate=cuota_empate, max_goles=6
     )
     ordenados = sorted(matriz.items(), key=lambda item: item[1], reverse=True)
+
+    top_3 = []
+    for rango, ((i, j), p) in enumerate(ordenados[:3], start=1):
+        cuota_justa = (1.0 / p) if p > 0.005 else 99.0
+        top_3.append(
+            {
+                "rango": rango,
+                "marcador": f"{i} - {j}",
+                "prob": round(p * 100, 1),
+                "cuota_justa": round(cuota_justa, 2),
+                "tipo": "Empate" if i == j else ("-2.5" if i + j <= 2 else "+2.5"),
+            }
+        )
 
     top_6 = []
     for (i, j), p in ordenados[:6]:
@@ -714,6 +742,7 @@ def analizar_marcadores_exactos(
         eval_objetivo = info_obj
 
     return {
+        "top_3": top_3,
         "top_6": top_6,
         "marcadores_clave": marcadores_clave,
         "eval_objetivo": eval_objetivo,
@@ -857,7 +886,7 @@ def renderizar_resultado(
     xg_v: float,
     info_marcadores: dict,
 ) -> None:
-    """Muestra el veredicto directo (+2.5 / -2.5 / NO APOSTAR), métricas y marcadores exactos."""
+    """Muestra el veredicto directo, los 3 resultados exactos más potentes y el desglose."""
     st.markdown(f"**Partido:** {partido_label}  |  **xG:** `{xg_l:.2f}` vs `{xg_v:.2f}`")
 
     r1, r2, r3, r4 = st.columns(4)
@@ -876,10 +905,21 @@ def renderizar_resultado(
     else:
         st.warning(f"### ⛔ NO APOSTAR\n{resultado['motivo']}")
 
+    st.markdown("#### 🏆 Top 3 resultados exactos más potentes")
+    t3_cols = st.columns(3)
+    medallas = ["🥇 Top 1", "🥈 Top 2", "🥉 Top 3"]
+    for idx, item in enumerate(info_marcadores["top_3"]):
+        with t3_cols[idx]:
+            st.info(
+                f"**{medallas[idx]}: `{item['marcador']}`**\n\n"
+                f"Prob.: **{item['prob']:.1f}%**\n\n"
+                f"Cuota justa: `{item['cuota_justa']:.2f}` · `{item['tipo']}`"
+            )
+
     if resultado.get("desglose"):
         st.dataframe(resultado["desglose"], width="stretch", hide_index=True)
 
-    st.markdown("#### 🎯 Marcadores exactos más probables (Dixon-Coles)")
+    st.markdown("#### 🎯 Marcadores clave y Top 6 (Dixon-Coles)")
     claves = info_marcadores["marcadores_clave"]
     k_cols = st.columns(6)
     for idx, (m_label, p_val) in enumerate(claves.items()):
@@ -955,7 +995,7 @@ def limpiar_todo_estado() -> None:
 
 
 st.title("⚽ Detector de Goles (+2.5 / -2.5)")
-st.caption("Dixon-Coles + marcadores exactos, país libre y cuota empate (X), 2 capturas OCR y Winamax.")
+st.caption("Dixon-Coles + Top 3 marcadores exactos, país libre y cuota empate (X), 2 capturas OCR y Winamax.")
 
 st.subheader("1. Capturas de partido y últimos 10 partidos (opcional)")
 cap_col1, cap_col2 = st.columns(2)
