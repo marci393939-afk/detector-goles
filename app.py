@@ -783,7 +783,7 @@ for clave, valor_ini in VALORES_POR_DEFECTO.items():
 
 
 def limpiar_todo_estado() -> None:
-    """Reinicia equipos, países, cuotas (en blanco), promedios y mensajes de estado."""
+    """Reinicia capturas, equipos, países, cuotas (en blanco), promedios y mensajes."""
     st.session_state["reset_nonce"] = st.session_state.get("reset_nonce", 0) + 1
     nuevo_nonce = st.session_state["reset_nonce"]
     st.session_state["api_info_msg"] = ""
@@ -805,14 +805,22 @@ def limpiar_todo_estado() -> None:
 
 
 st.title("⚽ Detector de Goles (+2.5 / -2.5)")
-st.caption("Dixon-Coles + país y cuota empate (X), captura OCR, API-Football (v3) y cuotas Winamax.")
+st.caption("Dixon-Coles + país y cuota empate (X), 2 capturas OCR, API-Football (v3) y cuotas Winamax.")
 
-st.subheader("1. Captura de partido (opcional)")
-archivo = st.file_uploader(
-    "Sube una captura del partido para sugerir los equipos",
-    type=["png", "jpg", "jpeg", "webp"],
-    key=f"uploader_{nonce}",
-)
+st.subheader("1. Capturas de partido y últimos 10 partidos (opcional)")
+cap_col1, cap_col2 = st.columns(2)
+with cap_col1:
+    archivo_local = st.file_uploader(
+        "Captura 1: Partido / 10 últimos Local",
+        type=["png", "jpg", "jpeg", "webp"],
+        key=f"uploader_local_{nonce}",
+    )
+with cap_col2:
+    archivo_visitante = st.file_uploader(
+        "Captura 2: 10 últimos Visitante",
+        type=["png", "jpg", "jpeg", "webp"],
+        key=f"uploader_visitante_{nonce}",
+    )
 
 with st.expander("Ajustes de API-Football, OCR y filtros"):
     api_key_input = st.text_input(
@@ -847,30 +855,54 @@ with st.expander("Ajustes de API-Football, OCR y filtros"):
         "Cuota mínima en -2.5 goles", min_value=1.30, max_value=3.00, value=1.45, step=0.05
     )
 
-texto_ocr = ""
+texto_ocr_1 = ""
+texto_ocr_2 = ""
 local_sugerido = ""
 visitante_sugerido = ""
+archivo_principal = archivo_local or archivo_visitante
 
-if archivo is not None:
-    img_bytes = archivo.getvalue()
-    imagen_original = Image.open(BytesIO(img_bytes))
-    st.image(
-        imagen_original,
-        caption=f"Captura cargada ({imagen_original.width}x{imagen_original.height} px)",
-        width="stretch",
-    )
+if archivo_local is not None or archivo_visitante is not None:
+    prev_cols = st.columns(2)
+    with prev_cols[0]:
+        if archivo_local is not None:
+            img_1 = Image.open(BytesIO(archivo_local.getvalue()))
+            st.image(
+                img_1,
+                caption=f"Captura 1 ({img_1.width}x{img_1.height} px)",
+                width="stretch",
+            )
+            try:
+                texto_ocr_1 = ejecutar_ocr_bytes(archivo_local.getvalue(), psm=psm)
+            except Exception as exc:
+                st.error(f"Error OCR en Captura 1: {exc}")
+    with prev_cols[1]:
+        if archivo_visitante is not None:
+            img_2 = Image.open(BytesIO(archivo_visitante.getvalue()))
+            st.image(
+                img_2,
+                caption=f"Captura 2 ({img_2.width}x{img_2.height} px)",
+                width="stretch",
+            )
+            try:
+                texto_ocr_2 = ejecutar_ocr_bytes(archivo_visitante.getvalue(), psm=psm)
+            except Exception as exc:
+                st.error(f"Error OCR en Captura 2: {exc}")
 
-    if st.button("Reescanear captura"):
+    if st.button("Reescanear capturas"):
         st.cache_data.clear()
 
-    try:
-        texto_ocr = ejecutar_ocr_bytes(img_bytes, psm=psm)
-        local_sugerido, visitante_sugerido = sugerir_equipos_candidatos(texto_ocr)
-    except Exception as exc:
-        st.error(f"Error al ejecutar OCR: {exc}")
+    texto_ocr_combinado = "\n".join(t for t in (texto_ocr_1, texto_ocr_2) if t.strip())
+    local_sugerido, visitante_sugerido = sugerir_equipos_candidatos(texto_ocr_combinado)
 
-    with st.expander("Ver texto detectado automáticamente en la captura"):
-        st.text(texto_ocr if texto_ocr.strip() else "No se detectó texto.")
+    with st.expander("Ver texto detectado automáticamente en las capturas"):
+        if texto_ocr_1.strip():
+            st.markdown("**Captura 1:**")
+            st.text(texto_ocr_1)
+        if texto_ocr_2.strip():
+            st.markdown("**Captura 2:**")
+            st.text(texto_ocr_2)
+        if not texto_ocr_combinado.strip():
+            st.text("No se detectó texto.")
 
 st.subheader("2. Partido, país y cuotas manuales de Winamax")
 col1, col2 = st.columns(2)
@@ -961,13 +993,15 @@ def actualizar_estadisticas_desde_api(
 
 
 if (
-    archivo is not None
+    archivo_principal is not None
     and auto_fetch
     and api_key_activa
     and equipo_local.strip()
     and equipo_visitante.strip()
 ):
-    par_id = f"{archivo.file_id}_{equipo_local.strip()}_{equipo_visitante.strip()}"
+    id_1 = getattr(archivo_local, "file_id", "") if archivo_local else ""
+    id_2 = getattr(archivo_visitante, "file_id", "") if archivo_visitante else ""
+    par_id = f"{id_1}_{id_2}_{equipo_local.strip()}_{equipo_visitante.strip()}"
     if st.session_state.get("ultimo_auto_fetch") != par_id:
         with st.spinner("Consultando últimos 10 partidos en API-Football..."):
             actualizar_estadisticas_desde_api(
