@@ -17,6 +17,33 @@ st.set_page_config(
 
 API_BASE_URL = "https://v3.football.api-sports.io"
 
+# Factor de ajuste de goles esperados por país/región (1.00 = neutro)
+FACTOR_PAIS = {
+    "España": 0.98,
+    "Inglaterra": 1.03,
+    "Alemania": 1.05,
+    "Italia": 0.96,
+    "Francia": 1.00,
+    "Portugal": 1.00,
+    "Países Bajos": 1.05,
+    "Bélgica": 1.02,
+    "Colombia": 0.95,
+    "Argentina": 0.94,
+    "Brasil": 0.96,
+    "Venezuela": 0.95,
+    "Chile": 0.98,
+    "Perú": 0.97,
+    "Uruguay": 0.95,
+    "México": 0.99,
+    "Estados Unidos": 1.03,
+    "Japón": 0.99,
+    "Corea del Sur": 0.97,
+    "Australia": 1.03,
+    "Otro / General": 1.00,
+}
+
+PAISES_DISPONIBLES = list(FACTOR_PAIS.keys())
+
 ALIAS_EQUIPOS = {
     "marsella": "Marseille",
     "olympique marsella": "Marseille",
@@ -156,14 +183,25 @@ def _fecha_partido(fixture_item: dict) -> str:
     return str(fixture_item.get("fixture", {}).get("date") or "")
 
 
-def buscar_equipo_api(nombre: str, api_key: str) -> dict | None:
+def buscar_equipo_api(nombre: str, api_key: str, pais_filtro: str | None = None) -> dict | None:
     consulta = preparar_nombre_busqueda(nombre)
-    data = api_get("teams", (("search", consulta),), api_key)
+    params_base: list[tuple[str, str]] = [("search", consulta)]
+    if pais_filtro and pais_filtro != "Otro / General":
+        params_base.append(("country", pais_filtro))
+
+    data = api_get("teams", tuple(params_base), api_key)
     errores = data.get("errors")
     if errores:
         raise RuntimeError(str(errores))
 
     resultados = data.get("response", [])
+    if not resultados and pais_filtro and pais_filtro != "Otro / General":
+        data = api_get("teams", (("search", consulta),), api_key)
+        errores = data.get("errors")
+        if errores:
+            raise RuntimeError(str(errores))
+        resultados = data.get("response", [])
+
     if not resultados and consulta != nombre.strip():
         data = api_get("teams", (("search", nombre.strip()),), api_key)
         errores = data.get("errors")
@@ -190,7 +228,7 @@ def buscar_equipo_api(nombre: str, api_key: str) -> dict | None:
 
 def obtener_promedios_10_api(team_id: int, api_key: str) -> dict | None:
     partidos: list[dict] = []
-    for temporada in ("2026", "2025"):
+    for temporada in ("2024", "2023", "2022"):
         data = api_get(
             "fixtures",
             (("team", str(team_id)), ("season", temporada), ("status", "FT")),
@@ -413,18 +451,38 @@ def sugerir_equipos_candidatos(texto_ocr: str) -> tuple[str, str]:
     return local, visitante
 
 
+def _rho_ajustado_por_empate(cuota_empate: float | None) -> float:
+    """Ajusta el parámetro rho de Dixon-Coles según la cuota de empate (X) en Winamax."""
+    rho_base = -0.10
+    if not cuota_empate or cuota_empate <= 1.05:
+        return rho_base
+    prob_imp_empate = 1.0 / cuota_empate
+    # Si la cuota de empate es baja (prob. implícita alta, p.ej. >= 28%), reforzamos ligeramente rho
+    if prob_imp_empate >= 0.28:
+        extra = min(0.08, (prob_imp_empate - 0.28) * 0.45)
+        return round(max(-0.18, rho_base - extra), 3)
+    # Si el empate paga alto (prob. implícita <= 21%), suavizamos rho
+    if prob_imp_empate <= 0.21:
+        suave = min(0.05, (0.21 - prob_imp_empate) * 0.35)
+        return round(min(-0.05, rho_base + suave), 3)
+    return rho_base
+
+
 def calcular_xg_moderado(
     gf_local_10: float,
     gc_local_10: float,
     gf_vis_10: float,
     gc_vis_10: float,
     goles_h2h_prom: float | None = None,
+    pais_local: str = "Otro / General",
+    pais_visitante: str = "Otro / General",
+    cuota_empate: float | None = None,
     peso_h2h: float = 0.12,
     factor_localia: float = 0.06,
 ) -> tuple[float, float]:
     """
     Calcula goles esperados moderando extremos, aplicando factor de localía,
-    frenando cuando hay defensas muy cerradas (GC < 0.95) y ponderando H2H.
+    factor por país de los equipos, freno ante defensas sólidas y ponderando H2H.
     """
     gf_l = min(max(gf_local_10, 0.15), 3.8)
     gc_l = min(max(gc_local_10, 0.15), 3.8)
@@ -434,10 +492,21 @@ def calcular_xg_moderado(
     xg_local = ((gf_l + gc_v) / 2.0) * (1.0 + factor_localia)
     xg_visitante = ((gf_v + gc_l) / 2.0) * (1.0 - factor_localia)
 
+    fac_pais_l = FACTOR_PAIS.get(pais_local, 1.0)
+    fac_pais_v = FACTOR_PAIS.get(pais_visitante, 1.0)
+    fac_pais_medio = (fac_pais_l + fac_pais_v) / 2.0
+    xg_local *= fac_pais_medio
+    xg_visitante *= fac_pais_medio
+
     # Si alguno de los dos equipos encaja poco en sus últimos 10 partidos, moderamos goles esperados
     if min(gc_l, gc_v) < 0.95:
         xg_local *= 0.93
         xg_visitante *= 0.93
+
+    # Si el empate tiene cuota baja (alta probabilidad implícita de partido cerrado), moderamos ligeramente
+    if cuota_empate and cuota_empate > 1.05 and (1.0 / cuota_empate) >= 0.30:
+        xg_local *= 0.96
+        xg_visitante *= 0.96
 
     if goles_h2h_prom is not None and goles_h2h_prom > 0:
         h2h_mod = min(max(goles_h2h_prom, 0.5), 5.0)
@@ -471,17 +540,19 @@ def _tau_dixon_coles(x: int, y: int, lam_x: float, lam_y: float, rho: float = -0
 def probs_over_under_25(
     xg_local: float,
     xg_visitante: float,
-    rho: float = -0.10,
+    cuota_empate: float | None = None,
     max_goles: int = 8,
 ) -> dict[str, float]:
-    """Calcula P(-2.5) y P(+2.5) mediante matriz bivariante con ajuste Dixon-Coles."""
+    """Calcula P(-2.5), P(+2.5) y P(Empate) mediante matriz bivariante con ajuste Dixon-Coles."""
     lam_l = max(0.05, xg_local)
     lam_v = max(0.05, xg_visitante)
+    rho = _rho_ajustado_por_empate(cuota_empate)
 
     probs_l = [poisson_pmf(i, lam_l) for i in range(max_goles + 1)]
     probs_v = [poisson_pmf(j, lam_v) for j in range(max_goles + 1)]
 
     p_under_25_bruta = 0.0
+    p_empate_bruta = 0.0
     p_total_matriz = 0.0
 
     for i in range(max_goles + 1):
@@ -491,15 +562,20 @@ def probs_over_under_25(
             p_total_matriz += p_ij
             if i + j <= 2:
                 p_under_25_bruta += p_ij
+            if i == j:
+                p_empate_bruta += p_ij
 
-    p_under_25 = p_under_25_bruta / p_total_matriz if p_total_matriz > 0 else 0.5
-    p_under_25 = min(0.98, max(0.02, p_under_25))
+    denom = p_total_matriz if p_total_matriz > 0 else 1.0
+    p_under_25 = min(0.98, max(0.02, p_under_25_bruta / denom))
     p_over_25 = 1.0 - p_under_25
+    p_empate = min(0.90, max(0.02, p_empate_bruta / denom))
 
     return {
         "xg_total": round(lam_l + lam_v, 2),
         "p_under_25": p_under_25,
         "p_over_25": p_over_25,
+        "p_empate": p_empate,
+        "rho": rho,
     }
 
 
@@ -508,6 +584,7 @@ def evaluar_entrada_25(
     xg_visitante: float,
     cuota_over_25: float | None = None,
     cuota_under_25: float | None = None,
+    cuota_empate: float | None = None,
     min_edge: float = 0.06,
     min_cuota_over: float = 1.55,
     min_cuota_under: float = 1.45,
@@ -515,9 +592,10 @@ def evaluar_entrada_25(
     min_prob_under: float = 0.58,
 ) -> dict:
     """Evalúa +2.5 y -2.5 goles exigiendo ventaja, cuota mínima y probabilidad mínima del modelo."""
-    probs = probs_over_under_25(xg_local, xg_visitante)
+    probs = probs_over_under_25(xg_local, xg_visitante, cuota_empate=cuota_empate)
     p_over = probs["p_over_25"]
     p_under = probs["p_under_25"]
+    p_empate = probs["p_empate"]
 
     opciones = []
     desglose = []
@@ -584,6 +662,20 @@ def evaluar_entrada_25(
                 }
             )
 
+    if cuota_empate and cuota_empate > 1.0:
+        imp_empate = 1.0 / cuota_empate
+        edge_empate = p_empate - imp_empate
+        desglose.append(
+            {
+                "Mercado": "Empate (X ref.)",
+                "Cuota": f"{cuota_empate:.2f}",
+                "Prob. modelo": f"{p_empate * 100:.1f}%",
+                "Prob. implícita": f"{imp_empate * 100:.1f}%",
+                "Ventaja": f"{edge_empate * 100:+.1f}%",
+                "Filtro": "Ref.",
+            }
+        )
+
     if not opciones:
         return {
             "decision": "NO APOSTAR",
@@ -591,6 +683,7 @@ def evaluar_entrada_25(
             "xg_total": probs["xg_total"],
             "p_over_25": round(p_over * 100, 1),
             "p_under_25": round(p_under * 100, 1),
+            "p_empate": round(p_empate * 100, 1),
             "desglose": desglose,
         }
 
@@ -606,6 +699,7 @@ def evaluar_entrada_25(
         "xg_total": probs["xg_total"],
         "p_over_25": round(p_over * 100, 1),
         "p_under_25": round(p_under * 100, 1),
+        "p_empate": round(p_empate * 100, 1),
         "desglose": desglose,
     }
 
@@ -614,10 +708,11 @@ def renderizar_resultado(resultado: dict, partido_label: str) -> None:
     """Muestra el veredicto directo (+2.5 goles, -2.5 goles o NO APOSTAR) y métricas."""
     st.markdown(f"**Partido:** {partido_label}")
 
-    r1, r2, r3 = st.columns(3)
+    r1, r2, r3, r4 = st.columns(4)
     r1.metric("Goles esperados (xG)", f"{resultado['xg_total']:.2f}")
     r2.metric("Prob. +2.5 goles", f"{resultado['p_over_25']:.1f}%")
     r3.metric("Prob. -2.5 goles", f"{resultado['p_under_25']:.1f}%")
+    r4.metric("Prob. Empate (X)", f"{resultado['p_empate']:.1f}%")
 
     if resultado["decision"] == "APOSTAR":
         st.success(
@@ -634,6 +729,8 @@ def renderizar_resultado(resultado: dict, partido_label: str) -> None:
 
 
 for clave, valor_ini in {
+    "pais_local": "Otro / General",
+    "pais_visitante": "Otro / General",
     "gf_local_10": 1.30,
     "gc_local_10": 1.05,
     "gf_vis_10": 1.15,
@@ -642,6 +739,7 @@ for clave, valor_ini in {
     "usar_h2h": False,
     "cuota_over_25_manual": 1.65,
     "cuota_under_25_manual": 2.15,
+    "cuota_empate_manual": 3.20,
     "api_info_msg": "",
     "api_warn_msg": "",
 }.items():
@@ -650,7 +748,7 @@ for clave, valor_ini in {
 
 
 st.title("⚽ Detector de Goles (+2.5 / -2.5)")
-st.caption("Modelo Dixon-Coles + localía, captura OCR, estadísticas API-Football (v3) y cuotas Winamax.")
+st.caption("Dixon-Coles + país y cuota empate (X), captura OCR, API-Football (v3) y cuotas Winamax.")
 
 st.subheader("1. Captura de partido (opcional)")
 archivo = st.file_uploader(
@@ -716,19 +814,25 @@ if archivo is not None:
     with st.expander("Ver texto detectado automáticamente en la captura"):
         st.text(texto_ocr if texto_ocr.strip() else "No se detectó texto.")
 
-st.subheader("2. Partido y cuotas manuales de Winamax")
+st.subheader("2. Partido, país y cuotas manuales de Winamax")
 col1, col2 = st.columns(2)
 with col1:
     equipo_local = st.text_input("Equipo Local", value=local_sugerido, key="equipo_local_input")
+    pais_local = st.selectbox("País Equipo Local", options=PAISES_DISPONIBLES, key="pais_local")
 with col2:
     equipo_visitante = st.text_input(
         "Equipo Visitante", value=visitante_sugerido, key="equipo_visitante_input"
+    )
+    pais_visitante = st.selectbox(
+        "País Equipo Visitante", options=PAISES_DISPONIBLES, key="pais_visitante"
     )
 
 api_key_activa = obtener_api_key(api_key_input)
 
 
-def actualizar_estadisticas_desde_api(loc: str, vis: str, key: str) -> None:
+def actualizar_estadisticas_desde_api(
+    loc: str, vis: str, key: str, p_loc: str, p_vis: str
+) -> None:
     st.session_state["api_info_msg"] = ""
     st.session_state["api_warn_msg"] = ""
 
@@ -743,8 +847,8 @@ def actualizar_estadisticas_desde_api(loc: str, vis: str, key: str) -> None:
         return
 
     try:
-        team_l = buscar_equipo_api(loc, key)
-        team_v = buscar_equipo_api(vis, key)
+        team_l = buscar_equipo_api(loc, key, pais_filtro=p_loc)
+        team_v = buscar_equipo_api(vis, key, pais_filtro=p_vis)
 
         if not team_l or not team_v:
             no_encontrado = loc if not team_l else vis
@@ -796,19 +900,23 @@ if (
     par_id = f"{archivo.file_id}_{equipo_local.strip()}_{equipo_visitante.strip()}"
     if st.session_state.get("ultimo_auto_fetch") != par_id:
         with st.spinner("Consultando últimos 10 partidos en API-Football..."):
-            actualizar_estadisticas_desde_api(equipo_local, equipo_visitante, api_key_activa)
+            actualizar_estadisticas_desde_api(
+                equipo_local, equipo_visitante, api_key_activa, pais_local, pais_visitante
+            )
         st.session_state["ultimo_auto_fetch"] = par_id
 
 if st.button("🔄 Buscar promedios reales en API-Football"):
     with st.spinner("Consultando últimos 10 partidos y H2H en API-Football..."):
-        actualizar_estadisticas_desde_api(equipo_local, equipo_visitante, api_key_activa)
+        actualizar_estadisticas_desde_api(
+            equipo_local, equipo_visitante, api_key_activa, pais_local, pais_visitante
+        )
 
 if st.session_state["api_info_msg"]:
     st.success(st.session_state["api_info_msg"])
 if st.session_state["api_warn_msg"]:
     st.warning(st.session_state["api_warn_msg"])
 
-c_over, c_under = st.columns(2)
+c_over, c_under, c_empate = st.columns(3)
 with c_over:
     usar_over = st.checkbox("Evaluar +2.5 goles", value=True)
     cuota_over_25 = st.number_input(
@@ -830,6 +938,17 @@ with c_under:
         format="%.2f",
         disabled=not usar_under,
         key="cuota_under_25_manual",
+    )
+with c_empate:
+    usar_empate_ref = st.checkbox("Usar cuota empate (X)", value=True)
+    cuota_empate = st.number_input(
+        "Cuota Empate X (Winamax)",
+        min_value=1.05,
+        max_value=25.00,
+        step=0.01,
+        format="%.2f",
+        disabled=not usar_empate_ref,
+        key="cuota_empate_manual",
     )
 
 st.subheader("3. Promedios (últimos 10 partidos y H2H)")
@@ -876,12 +995,17 @@ if usar_h2h:
         key="goles_h2h_prom",
     )
 
+cuota_x_activa = cuota_empate if usar_empate_ref else None
+
 xg_l, xg_v = calcular_xg_moderado(
     gf_local_10=gf_local_10,
     gc_local_10=gc_local_10,
     gf_vis_10=gf_vis_10,
     gc_vis_10=gc_vis_10,
     goles_h2h_prom=goles_h2h_prom,
+    pais_local=pais_local,
+    pais_visitante=pais_visitante,
+    cuota_empate=cuota_x_activa,
 )
 
 resultado_actual = evaluar_entrada_25(
@@ -889,6 +1013,7 @@ resultado_actual = evaluar_entrada_25(
     xg_visitante=xg_v,
     cuota_over_25=cuota_over_25 if usar_over else None,
     cuota_under_25=cuota_under_25 if usar_under else None,
+    cuota_empate=cuota_x_activa,
     min_edge=min_edge_pct / 100.0,
     min_cuota_over=min_cuota_over,
     min_cuota_under=min_cuota_under,
@@ -896,7 +1021,7 @@ resultado_actual = evaluar_entrada_25(
     min_prob_under=min_prob_under_pct / 100.0,
 )
 
-partido_label = f"{equipo_local or 'Local'} vs {equipo_visitante or 'Visitante'}"
+partido_label = f"{equipo_local or 'Local'} ({pais_local}) vs {equipo_visitante or 'Visitante'} ({pais_visitante})"
 
 st.divider()
 st.subheader("4. Análisis del modelo")
