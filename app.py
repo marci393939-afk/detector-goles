@@ -10,6 +10,7 @@ from PIL import Image, ImageEnhance, ImageOps
 import pytesseract
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 
 
 st.set_page_config(
@@ -20,6 +21,7 @@ st.set_page_config(
 
 API_BASE_URL = "https://v3.football.api-sports.io"
 HISTORIAL_CSV = "historial_betdiary.csv"
+BETDIARY_URL = "https://betdiary.io"
 
 FACTOR_PAIS_NORM = {
     "espana": 0.98,
@@ -417,12 +419,16 @@ def extraer_resultados_captura(texto_ocr: str) -> dict:
         l_limpia = linea.strip()
         if not l_limpia:
             continue
-        if re.search(r"\b\d{4}\b", l_limpia) or re.search(r"\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?", l_limpia):
+        if re.search(r"\b\d{4}\b", l_limpia) or re.search(
+            r"\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?", l_limpia
+        ):
             continue
         if re.search(r"\b(?:0?\d|1\d|2[0-3]):(?:00|15|30|45)\b", l_limpia):
             continue
 
-        parejas = list(re.finditer(r"(?<![.,\d])(\d{1,2})\s*[-–:]\s*(\d{1,2})(?![.,\d])", l_limpia))
+        parejas = list(
+            re.finditer(r"(?<![.,\d])(\d{1,2})\s*[-–:]\s*(\d{1,2})(?![.,\d])", l_limpia)
+        )
         if parejas:
             goles_sueltos.clear()
             for m in parejas:
@@ -885,7 +891,6 @@ def evaluar_entrada_25(
 
 
 def guardar_apuesta_csv(fila: dict) -> str:
-    """Guarda el registro de apuesta en historial_betdiary.csv y devuelve el contenido CSV."""
     columnas = [
         "fecha",
         "partido",
@@ -908,6 +913,24 @@ def guardar_apuesta_csv(fila: dict) -> str:
     linea = ",".join(str(fila.get(c, "")).replace(",", ";") for c in columnas) + "\n"
     buf.write(linea.encode("utf-8"))
     return buf.getvalue().decode("utf-8")
+
+
+def redirigir_a_betdiary(texto_resumen: str) -> None:
+    """Copia el resumen al portapapeles si es posible y abre betdiary.io directamente."""
+    seguro = texto_resumen.replace("\\", "\\\\").replace("'", "\\'").replace("\n", " ")
+    html_redir = f"""
+    <script>
+      (function() {{
+        try {{
+          if (navigator.clipboard && navigator.clipboard.writeText) {{
+            navigator.clipboard.writeText('{seguro}').catch(function(){{}});
+          }}
+        }} catch(e) {{}}
+        window.open('{BETDIARY_URL}', '_blank', 'noopener,noreferrer');
+      }})();
+    </script>
+    """
+    components.html(html_redir, height=0)
 
 
 def renderizar_resultado(
@@ -973,46 +996,52 @@ def renderizar_resultado(
     if resultado.get("desglose"):
         st.dataframe(resultado["desglose"], width="stretch", hide_index=True)
 
-    # Selección y cuota para registrar en Betdiary
     if resultado["decision"] == "APOSTAR":
         sel_def = resultado["mercado"]
         cuota_def = float(resultado["cuota"])
     else:
-        sel_def = "-2.5 goles" if resultado["p_under_25"] >= resultado["p_over_25"] else "+2.5 goles"
-        cuota_def = cuota_under_25 if (sel_def == "-2.5 goles" and cuota_under_25) else (cuota_over_25 or 2.00)
+        sel_def = (
+            "-2.5 goles"
+            if resultado["p_under_25"] >= resultado["p_over_25"]
+            else "+2.5 goles"
+        )
+        cuota_def = (
+            cuota_under_25
+            if (sel_def == "-2.5 goles" and cuota_under_25)
+            else (cuota_over_25 or 2.00)
+        )
 
     beneficio_pot = round(stake_val * (cuota_def - 1.0), 2)
     top3_txt = " | ".join(f"{m['marcador']} ({m['prob']}%)" for m in top_3)
+    resumen_linea = (
+        f"Partido: {partido_label} | Selección: {sel_def} | "
+        f"Cuota: {cuota_def:.2f} | Stake: {stake_val:.2f} | "
+        f"Ganancia est.: +{beneficio_pot:.2f} | Top 3: {top3_txt}"
+    )
 
-    st.markdown("#### 📓 Registrar apuesta en Betdiary")
-    b_col1, b_col2 = st.columns([2, 1])
-    with b_col1:
-        if st.button("📌 Registrar apuesta en Betdiary", type="primary"):
-            fila = {
-                "fecha": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                "partido": partido_label,
-                "seleccion": sel_def,
-                "cuota": f"{cuota_def:.2f}",
-                "stake": f"{stake_val:.2f}",
-                "beneficio_potencial": f"{beneficio_pot:.2f}",
-                "top_3_marcadores": top3_txt,
-                "bookie": "Winamax",
-            }
-            csv_str = guardar_apuesta_csv(fila)
-            st.session_state["ultimo_registro_betdiary"] = fila
-            st.session_state["ultimo_csv_betdiary"] = csv_str
-            st.success("Apuesta registrada en el historial local y preparada para Betdiary.")
-    with b_col2:
-        st.link_button("Abrir Betdiary.io ↗", "https://betdiary.io/dashboard/")
+    st.markdown("#### 📓 Enviar a Betdiary")
+    if st.button("🚀 Enviar e ir a Betdiary.io", type="primary"):
+        fila = {
+            "fecha": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "partido": partido_label,
+            "seleccion": sel_def,
+            "cuota": f"{cuota_def:.2f}",
+            "stake": f"{stake_val:.2f}",
+            "beneficio_potencial": f"{beneficio_pot:.2f}",
+            "top_3_marcadores": top3_txt,
+            "bookie": "Winamax",
+        }
+        csv_str = guardar_apuesta_csv(fila)
+        st.session_state["ultimo_registro_betdiary"] = fila
+        st.session_state["ultimo_csv_betdiary"] = csv_str
+        st.session_state["ultimo_resumen_betdiary"] = resumen_linea
+        redirigir_a_betdiary(resumen_linea)
+        st.success("Apuesta guardada y abriendo Betdiary.io...")
+
+    st.link_button("Abrir Betdiary.io directamente ↗", BETDIARY_URL)
 
     if "ultimo_registro_betdiary" in st.session_state:
-        reg = st.session_state["ultimo_registro_betdiary"]
-        st.code(
-            f"Partido: {reg['partido']} | Selección: {reg['seleccion']} | "
-            f"Cuota: {reg['cuota']} | Stake: {reg['stake']} | Ganancia est.: +{reg['beneficio_potencial']} | "
-            f"Top 3: {reg['top_3_marcadores']}",
-            language="text",
-        )
+        st.code(st.session_state["ultimo_resumen_betdiary"], language="text")
         st.download_button(
             "⬇️ Descargar CSV de esta apuesta",
             data=st.session_state["ultimo_csv_betdiary"],
@@ -1079,7 +1108,7 @@ def limpiar_todo_estado() -> None:
 
 
 st.title("⚽ Detector de Goles (+2.5 / -2.5)")
-st.caption("Lectura OCR de resultados (% +2.5 / -2.5), 3 resultados exactos más potentes y registro para Betdiary.")
+st.caption("Lectura OCR de resultados (% +2.5 / -2.5), 3 resultados exactos más potentes y envío directo a Betdiary.io.")
 
 st.subheader("1. Capturas de partido y últimos 10 partidos (opcional)")
 cap_col1, cap_col2 = st.columns(2)
