@@ -916,7 +916,6 @@ def guardar_apuesta_csv(fila: dict) -> str:
 
 
 def redirigir_a_betdiary(texto_resumen: str) -> None:
-    """Copia el resumen al portapapeles si es posible y abre betdiary.io directamente."""
     seguro = texto_resumen.replace("\\", "\\\\").replace("'", "\\'").replace("\n", " ")
     html_redir = f"""
     <script>
@@ -1019,7 +1018,15 @@ def renderizar_resultado(
         f"Ganancia est.: +{beneficio_pot:.2f} | Top 3: {top3_txt}"
     )
 
-    st.markdown("#### 📓 Enviar a Betdiary")
+    st.markdown("#### 📓 Campos listos para pegar en Betdiary (Track a New Bet)")
+    bd_c1, bd_c2 = st.columns(2)
+    with bd_c1:
+        st.text_input("Event (copiar)", value=partido_label, key="bd_copy_event")
+        st.text_input("Selection (copiar)", value=sel_def, key="bd_copy_sel")
+    with bd_c2:
+        st.text_input("Odds (copiar)", value=f"{cuota_def:.2f}", key="bd_copy_odds")
+        st.text_input("Stake (copiar)", value=f"{stake_val:.0f}", key="bd_copy_stake")
+
     if st.button("🚀 Enviar e ir a Betdiary.io", type="primary"):
         fila = {
             "fecha": datetime.now().strftime("%Y-%m-%d %H:%M"),
