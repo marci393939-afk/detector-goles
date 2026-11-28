@@ -52,6 +52,34 @@ FACTOR_PAIS_NORM = {
     "otro / general": 1.00,
 }
 
+TRADUCCION_PAIS_API = {
+    "spain": "España",
+    "england": "Inglaterra",
+    "germany": "Alemania",
+    "italy": "Italia",
+    "france": "Francia",
+    "portugal": "Portugal",
+    "netherlands": "Países Bajos",
+    "belgium": "Bélgica",
+    "colombia": "Colombia",
+    "argentina": "Argentina",
+    "brazil": "Brasil",
+    "venezuela": "Venezuela",
+    "chile": "Chile",
+    "peru": "Perú",
+    "uruguay": "Uruguay",
+    "mexico": "México",
+    "usa": "Estados Unidos",
+    "united states": "Estados Unidos",
+    "japan": "Japón",
+    "south korea": "Corea del Sur",
+    "australia": "Australia",
+    "north macedonia": "Macedonia del Norte",
+    "poland": "Polonia",
+    "singapore": "Singapur",
+    "bulgaria": "Bulgaria",
+}
+
 ALIAS_EQUIPOS = {
     "marsella": "Marseille",
     "olympique marsella": "Marseille",
@@ -197,6 +225,14 @@ def normalizar_texto(texto: str) -> str:
     return re.sub(r"\s+", " ", sin_tildes).strip().lower()
 
 
+def formatear_pais_detectado(pais_api: str | None) -> str:
+    if not pais_api or not pais_api.strip():
+        return ""
+    limpio = pais_api.strip()
+    clave = normalizar_texto(limpio)
+    return TRADUCCION_PAIS_API.get(clave, limpio)
+
+
 def obtener_factor_pais(pais: str) -> float:
     clave = normalizar_texto(pais or "")
     if not clave:
@@ -283,6 +319,15 @@ def buscar_equipo_api(nombre: str, api_key: str, pais_filtro: str | None = None)
             return team
 
     return resultados[0].get("team")
+
+
+def detectar_pais_equipo(nombre: str, api_key: str, pais_actual: str = "") -> str:
+    if not nombre.strip() or not api_key:
+        return pais_actual.strip()
+    equipo = buscar_equipo_api(nombre, api_key, pais_filtro=None)
+    if equipo and equipo.get("country"):
+        return formatear_pais_detectado(equipo.get("country"))
+    return pais_actual.strip()
 
 
 def obtener_promedios_10_api(team_id: int, api_key: str) -> dict | None:
@@ -487,7 +532,6 @@ def extraer_resultados_captura(texto_ocr: str, texto_franja: str = "") -> dict:
     parejas_franja = _extraer_parejas_de_texto(texto_franja)
     parejas_full = _extraer_parejas_de_texto(texto_ocr)
 
-    # Prioriza la franja derecha recortada cuando detecta al menos tantos partidos como la captura entera
     if len(parejas_franja) >= max(len(parejas_full), 6):
         marcadores = parejas_franja
     elif len(parejas_full) >= len(parejas_franja):
@@ -1167,6 +1211,7 @@ def limpiar_todo_estado() -> None:
     st.session_state["api_warn_msg"] = ""
     st.session_state["ultimo_auto_fetch"] = ""
     st.session_state["ultimo_ocr_pct_sync"] = ""
+    st.session_state["ultimo_pais_sync"] = ""
     st.session_state[f"equipo_local_input_{nuevo_nonce}"] = ""
     st.session_state[f"equipo_visitante_input_{nuevo_nonce}"] = ""
     st.session_state[f"pais_local_txt_{nuevo_nonce}"] = ""
@@ -1211,7 +1256,7 @@ with st.expander("Ajustes de API-Football, OCR y filtros"):
         type="password",
     )
     auto_fetch = st.checkbox(
-        "Buscar promedios automáticamente al subir una captura nueva", value=True
+        "Buscar promedios y país automáticamente al detectar o cambiar equipos", value=True
     )
     psm = st.selectbox("Modo de segmentación OCR (PSM)", options=[6, 4, 11, 3], index=0)
     min_edge_pct = st.slider(
@@ -1322,6 +1367,30 @@ if archivo_local is not None or archivo_visitante is not None:
         if not texto_ocr_combinado.strip():
             st.text("No se detectó texto.")
 
+api_key_activa = obtener_api_key(api_key_input)
+
+# Detección automática del país de cada equipo cuando cambian los nombres
+firma_equipos = f"{nonce}_{st.session_state.get(f'equipo_local_input_{nonce}', '')}_{st.session_state.get(f'equipo_visitante_input_{nonce}', '')}"
+if api_key_activa and st.session_state.get("ultimo_pais_sync") != firma_equipos:
+    loc_actual = st.session_state.get(f"equipo_local_input_{nonce}", "").strip()
+    vis_actual = st.session_state.get(f"equipo_visitante_input_{nonce}", "").strip()
+    try:
+        if loc_actual:
+            pais_det_l = detectar_pais_equipo(
+                loc_actual, api_key_activa, st.session_state.get(f"pais_local_txt_{nonce}", "")
+            )
+            if pais_det_l:
+                st.session_state[f"pais_local_txt_{nonce}"] = pais_det_l
+        if vis_actual:
+            pais_det_v = detectar_pais_equipo(
+                vis_actual, api_key_activa, st.session_state.get(f"pais_visitante_txt_{nonce}", "")
+            )
+            if pais_det_v:
+                st.session_state[f"pais_visitante_txt_{nonce}"] = pais_det_v
+        st.session_state["ultimo_pais_sync"] = firma_equipos
+    except Exception:
+        pass
+
 st.subheader("2. Partido, país y cuotas manuales de Winamax")
 col1, col2 = st.columns(2)
 with col1:
@@ -1332,7 +1401,7 @@ with col1:
     )
     pais_local = st.text_input(
         "País Equipo Local",
-        placeholder="Ej. Macedonia del Norte",
+        placeholder="Detección automática con API-Football",
         key=f"pais_local_txt_{nonce}",
     )
 with col2:
@@ -1343,11 +1412,9 @@ with col2:
     )
     pais_visitante = st.text_input(
         "País Equipo Visitante",
-        placeholder="Ej. Macedonia del Norte",
+        placeholder="Detección automática con API-Football",
         key=f"pais_visitante_txt_{nonce}",
     )
-
-api_key_activa = obtener_api_key(api_key_input)
 
 
 def actualizar_estadisticas_desde_api(
@@ -1367,8 +1434,12 @@ def actualizar_estadisticas_desde_api(
         return
 
     try:
-        team_l = buscar_equipo_api(loc, key, pais_filtro=p_loc)
-        team_v = buscar_equipo_api(vis, key, pais_filtro=p_vis)
+        team_l = buscar_equipo_api(loc, key, pais_filtro=None) or buscar_equipo_api(
+            loc, key, pais_filtro=p_loc
+        )
+        team_v = buscar_equipo_api(vis, key, pais_filtro=None) or buscar_equipo_api(
+            vis, key, pais_filtro=p_vis
+        )
 
         if not team_l or not team_v:
             no_encontrado = loc if not team_l else vis
@@ -1376,6 +1447,15 @@ def actualizar_estadisticas_desde_api(
                 f"No se encontró '{no_encontrado}' en API-Football. Revisa el nombre o rellena los promedios a mano."
             )
             return
+
+        if team_l.get("country"):
+            st.session_state[f"pais_local_txt_{cur_nonce}"] = formatear_pais_detectado(
+                team_l.get("country")
+            )
+        if team_v.get("country"):
+            st.session_state[f"pais_visitante_txt_{cur_nonce}"] = formatear_pais_detectado(
+                team_v.get("country")
+            )
 
         stats_l = obtener_promedios_10_api(team_l["id"], key)
         stats_v = obtener_promedios_10_api(team_v["id"], key)
@@ -1404,11 +1484,14 @@ def actualizar_estadisticas_desde_api(
             st.session_state[f"usar_h2h_{cur_nonce}"] = False
             h2h_txt = " | H2H sin datos suficientes"
 
+        pais_l_mostrado = st.session_state.get(f"pais_local_txt_{cur_nonce}", "") or "-"
+        pais_v_mostrado = st.session_state.get(f"pais_visitante_txt_{cur_nonce}", "") or "-"
+
         st.session_state["api_info_msg"] = (
-            f"Datos cargados: **{team_l['name']}** ({stats_l['partidos']} PJ: "
+            f"Datos cargados: **{team_l['name']}** [{pais_l_mostrado}] ({stats_l['partidos']} PJ: "
             f"GF {stats_l['gf_prom']:.2f}, GC {stats_l['gc_prom']:.2f}, "
             f"+2.5 {stats_l['pct_over_25']:.1f}% / -2.5 {stats_l['pct_under_25']:.1f}%) vs "
-            f"**{team_v['name']}** ({stats_v['partidos']} PJ: "
+            f"**{team_v['name']}** [{pais_v_mostrado}] ({stats_v['partidos']} PJ: "
             f"GF {stats_v['gf_prom']:.2f}, GC {stats_v['gc_prom']:.2f}, "
             f"+2.5 {stats_v['pct_over_25']:.1f}% / -2.5 {stats_v['pct_under_25']:.1f}%){h2h_txt}"
         )
@@ -1427,7 +1510,7 @@ if (
     id_2 = getattr(archivo_visitante, "file_id", "") if archivo_visitante else ""
     par_id = f"{id_1}_{id_2}_{equipo_local.strip()}_{equipo_visitante.strip()}"
     if st.session_state.get("ultimo_auto_fetch") != par_id:
-        with st.spinner("Consultando últimos 10 partidos en API-Football..."):
+        with st.spinner("Consultando últimos 10 partidos y país en API-Football..."):
             actualizar_estadisticas_desde_api(
                 equipo_local, equipo_visitante, api_key_activa, pais_local, pais_visitante, nonce
             )
@@ -1436,7 +1519,7 @@ if (
 b_col1, b_col2 = st.columns([2, 1])
 with b_col1:
     if st.button("🔄 Buscar promedios reales en API-Football"):
-        with st.spinner("Consultando últimos 10 partidos y H2H en API-Football..."):
+        with st.spinner("Consultando últimos 10 partidos, país y H2H en API-Football..."):
             actualizar_estadisticas_desde_api(
                 equipo_local, equipo_visitante, api_key_activa, pais_local, pais_visitante, nonce
             )
