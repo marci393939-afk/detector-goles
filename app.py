@@ -686,6 +686,7 @@ def calcular_xg_moderado(
     pais_local: str = "",
     pais_visitante: str = "",
     cuota_empate: float | None = None,
+    cuota_under_25: float | None = None,
     pct_over_local: float | None = None,
     pct_over_vis: float | None = None,
     peso_h2h: float = 0.12,
@@ -707,16 +708,22 @@ def calcular_xg_moderado(
 
     if pct_over_local is not None and pct_over_vis is not None:
         pct_medio_over = (pct_over_local + pct_over_vis) / 2.0
-        ajuste_tendencia = 1.0 + ((pct_medio_over - 50.0) / 100.0) * 0.60
-        ajuste_tendencia = min(1.30, max(0.80, ajuste_tendencia))
+        ajuste_tendencia = 1.0 + ((pct_medio_over - 50.0) / 100.0) * 0.65
+        ajuste_tendencia = min(1.32, max(0.80, ajuste_tendencia))
         xg_local *= ajuste_tendencia
         xg_visitante *= ajuste_tendencia
 
-    if min(gc_l, gc_v) < 0.90:
+    # Si la cuota de -2.5 goles es alta (>= 2.05), el mercado suele esperar partido abierto
+    if cuota_under_25 and cuota_under_25 >= 2.05:
+        empujon_under = min(1.14, 1.0 + ((cuota_under_25 - 2.00) * 0.25))
+        xg_local *= empujon_under
+        xg_visitante *= empujon_under
+
+    if min(gc_l, gc_v) < 0.85:
         xg_local *= 0.96
         xg_visitante *= 0.96
 
-    if cuota_empate and cuota_empate > 1.05 and (1.0 / cuota_empate) >= 0.30:
+    if cuota_empate and cuota_empate > 1.05 and (1.0 / cuota_empate) >= 0.31:
         xg_local *= 0.97
         xg_visitante *= 0.97
 
@@ -861,6 +868,7 @@ def _motivo_fallo_filtro(
     min_cuota: float,
     prob: float,
     min_prob: float,
+    max_cuota: float | None = None,
 ) -> str:
     fallos = []
     if edge < min_edge:
@@ -869,6 +877,8 @@ def _motivo_fallo_filtro(
         fallos.append(f"prob. {prob * 100:.1f}% < {min_prob * 100:.1f}%")
     if cuota < min_cuota:
         fallos.append(f"cuota {cuota:.2f} < {min_cuota:.2f}")
+    if max_cuota is not None and cuota > max_cuota:
+        fallos.append(f"cuota {cuota:.2f} > máx. {max_cuota:.2f}")
     return " · ".join(fallos) if fallos else "OK"
 
 
@@ -881,8 +891,9 @@ def evaluar_entrada_25(
     min_edge: float = 0.045,
     min_cuota_over: float = 1.45,
     min_cuota_under: float = 1.45,
+    max_cuota_under: float = 1.95,
     min_prob_over: float = 0.52,
-    min_prob_under: float = 0.54,
+    min_prob_under: float = 0.57,
 ) -> dict:
     probs = probs_over_under_25(xg_local, xg_visitante, cuota_empate=cuota_empate)
     p_over = probs["p_over_25"]
@@ -933,10 +944,17 @@ def evaluar_entrada_25(
         pasa_under = (
             edge_under >= min_edge
             and cuota_under_25 >= min_cuota_under
+            and cuota_under_25 <= max_cuota_under
             and p_under >= min_prob_under
         )
         motivo_u = _motivo_fallo_filtro(
-            edge_under, min_edge, cuota_under_25, min_cuota_under, p_under, min_prob_under
+            edge_under,
+            min_edge,
+            cuota_under_25,
+            min_cuota_under,
+            p_under,
+            min_prob_under,
+            max_cuota=max_cuota_under,
         )
         desglose.append(
             {
@@ -1273,7 +1291,7 @@ with st.expander("Ajustes de API-Football, OCR y filtros"):
         "Probabilidad mínima del modelo en -2.5 goles (%)",
         min_value=45.0,
         max_value=75.0,
-        value=54.0,
+        value=57.0,
         step=1.0,
     )
     min_cuota_over = st.slider(
@@ -1281,6 +1299,9 @@ with st.expander("Ajustes de API-Football, OCR y filtros"):
     )
     min_cuota_under = st.slider(
         "Cuota mínima en -2.5 goles", min_value=1.30, max_value=3.00, value=1.45, step=0.05
+    )
+    max_cuota_under = st.slider(
+        "Cuota máxima permitida en -2.5 goles", min_value=1.70, max_value=2.60, value=1.95, step=0.05
     )
 
 texto_ocr_1 = ""
@@ -1369,7 +1390,6 @@ if archivo_local is not None or archivo_visitante is not None:
 
 api_key_activa = obtener_api_key(api_key_input)
 
-# Detección automática del país de cada equipo cuando cambian los nombres
 firma_equipos = f"{nonce}_{st.session_state.get(f'equipo_local_input_{nonce}', '')}_{st.session_state.get(f'equipo_visitante_input_{nonce}', '')}"
 if api_key_activa and st.session_state.get("ultimo_pais_sync") != firma_equipos:
     loc_actual = st.session_state.get(f"equipo_local_input_{nonce}", "").strip()
@@ -1650,6 +1670,7 @@ xg_l, xg_v = calcular_xg_moderado(
     pais_local=pais_local,
     pais_visitante=pais_visitante,
     cuota_empate=cuota_x_activa,
+    cuota_under_25=cuota_under_25 if usar_under else None,
     pct_over_local=pct_over_local_10,
     pct_over_vis=pct_over_vis_10,
 )
@@ -1663,6 +1684,7 @@ resultado_actual = evaluar_entrada_25(
     min_edge=min_edge_pct / 100.0,
     min_cuota_over=min_cuota_over,
     min_cuota_under=min_cuota_under,
+    max_cuota_under=max_cuota_under,
     min_prob_over=min_prob_over_pct / 100.0,
     min_prob_under=min_prob_under_pct / 100.0,
 )
