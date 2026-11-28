@@ -614,18 +614,18 @@ def calcular_xg_moderado(
 
     if pct_over_local is not None and pct_over_vis is not None:
         pct_medio_over = (pct_over_local + pct_over_vis) / 2.0
-        ajuste_tendencia = 1.0 + ((pct_medio_over - 50.0) / 100.0) * 0.45
-        ajuste_tendencia = min(1.22, max(0.82, ajuste_tendencia))
+        ajuste_tendencia = 1.0 + ((pct_medio_over - 50.0) / 100.0) * 0.60
+        ajuste_tendencia = min(1.30, max(0.80, ajuste_tendencia))
         xg_local *= ajuste_tendencia
         xg_visitante *= ajuste_tendencia
 
-    if min(gc_l, gc_v) < 0.95:
-        xg_local *= 0.93
-        xg_visitante *= 0.93
-
-    if cuota_empate and cuota_empate > 1.05 and (1.0 / cuota_empate) >= 0.30:
+    if min(gc_l, gc_v) < 0.90:
         xg_local *= 0.96
         xg_visitante *= 0.96
+
+    if cuota_empate and cuota_empate > 1.05 and (1.0 / cuota_empate) >= 0.30:
+        xg_local *= 0.97
+        xg_visitante *= 0.97
 
     if goles_h2h_prom is not None and goles_h2h_prom > 0:
         h2h_mod = min(max(goles_h2h_prom, 0.5), 5.0)
@@ -761,17 +761,35 @@ def top_3_resultados_exactos(
     return top_3
 
 
+def _motivo_fallo_filtro(
+    edge: float,
+    min_edge: float,
+    cuota: float,
+    min_cuota: float,
+    prob: float,
+    min_prob: float,
+) -> str:
+    fallos = []
+    if edge < min_edge:
+        fallos.append(f"ventaja {edge * 100:+.1f}% < {min_edge * 100:.1f}%")
+    if prob < min_prob:
+        fallos.append(f"prob. {prob * 100:.1f}% < {min_prob * 100:.1f}%")
+    if cuota < min_cuota:
+        fallos.append(f"cuota {cuota:.2f} < {min_cuota:.2f}")
+    return " · ".join(fallos) if fallos else "OK"
+
+
 def evaluar_entrada_25(
     xg_local: float,
     xg_visitante: float,
     cuota_over_25: float | None = None,
     cuota_under_25: float | None = None,
     cuota_empate: float | None = None,
-    min_edge: float = 0.06,
-    min_cuota_over: float = 1.55,
+    min_edge: float = 0.045,
+    min_cuota_over: float = 1.45,
     min_cuota_under: float = 1.45,
-    min_prob_over: float = 0.56,
-    min_prob_under: float = 0.58,
+    min_prob_over: float = 0.52,
+    min_prob_under: float = 0.54,
 ) -> dict:
     probs = probs_over_under_25(xg_local, xg_visitante, cuota_empate=cuota_empate)
     p_over = probs["p_over_25"]
@@ -790,6 +808,9 @@ def evaluar_entrada_25(
             and cuota_over_25 >= min_cuota_over
             and p_over >= min_prob_over
         )
+        motivo_o = _motivo_fallo_filtro(
+            edge_over, min_edge, cuota_over_25, min_cuota_over, p_over, min_prob_over
+        )
         desglose.append(
             {
                 "Mercado": "+2.5 goles",
@@ -797,7 +818,7 @@ def evaluar_entrada_25(
                 "Prob. modelo": f"{p_over * 100:.1f}%",
                 "Prob. implícita": f"{imp_over * 100:.1f}%",
                 "Ventaja": f"{edge_over * 100:+.1f}%",
-                "Filtro": "OK" if pasa_over else "No",
+                "Filtro": "OK" if pasa_over else f"No ({motivo_o})",
             }
         )
         if pasa_over:
@@ -821,6 +842,9 @@ def evaluar_entrada_25(
             and cuota_under_25 >= min_cuota_under
             and p_under >= min_prob_under
         )
+        motivo_u = _motivo_fallo_filtro(
+            edge_under, min_edge, cuota_under_25, min_cuota_under, p_under, min_prob_under
+        )
         desglose.append(
             {
                 "Mercado": "-2.5 goles",
@@ -828,7 +852,7 @@ def evaluar_entrada_25(
                 "Prob. modelo": f"{p_under * 100:.1f}%",
                 "Prob. implícita": f"{imp_under * 100:.1f}%",
                 "Ventaja": f"{edge_under * 100:+.1f}%",
-                "Filtro": "OK" if pasa_under else "No",
+                "Filtro": "OK" if pasa_under else f"No ({motivo_u})",
             }
         )
         if pasa_under:
@@ -861,7 +885,7 @@ def evaluar_entrada_25(
         motivo = (
             "Introduce al menos una cuota válida de Winamax (+2.5 o -2.5) en la sección 2."
             if not desglose
-            else "Ningún mercado supera los filtros de ventaja, probabilidad mínima o cuota mínima."
+            else "Ningún mercado supera todos los filtros configurados (revisa la columna Filtro)."
         )
         return {
             "decision": "NO APOSTAR",
@@ -1142,24 +1166,24 @@ with st.expander("Ajustes de API-Football, OCR y filtros"):
     )
     psm = st.selectbox("Modo de segmentación OCR (PSM)", options=[6, 4, 11, 3], index=0)
     min_edge_pct = st.slider(
-        "Ventaja mínima sobre cuota (%)", min_value=2.0, max_value=25.0, value=6.0, step=0.5
+        "Ventaja mínima sobre cuota (%)", min_value=2.0, max_value=25.0, value=4.5, step=0.5
     )
     min_prob_over_pct = st.slider(
         "Probabilidad mínima del modelo en +2.5 goles (%)",
         min_value=45.0,
         max_value=75.0,
-        value=56.0,
+        value=52.0,
         step=1.0,
     )
     min_prob_under_pct = st.slider(
         "Probabilidad mínima del modelo en -2.5 goles (%)",
         min_value=45.0,
         max_value=75.0,
-        value=58.0,
+        value=54.0,
         step=1.0,
     )
     min_cuota_over = st.slider(
-        "Cuota mínima en +2.5 goles", min_value=1.30, max_value=2.50, value=1.55, step=0.05
+        "Cuota mínima en +2.5 goles", min_value=1.30, max_value=2.50, value=1.45, step=0.05
     )
     min_cuota_under = st.slider(
         "Cuota mínima en -2.5 goles", min_value=1.30, max_value=3.00, value=1.45, step=0.05
