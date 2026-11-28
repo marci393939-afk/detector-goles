@@ -151,9 +151,13 @@ VALORES_POR_DEFECTO = {
     "cuota_over_25_txt": "",
     "cuota_under_25_txt": "",
     "cuota_empate_txt": "",
+    "marcador_objetivo": "1-1",
+    "cuota_marcador_txt": "",
     "api_info_msg": "",
     "api_warn_msg": "",
 }
+
+MARCADORES_COMUNES = ["0-0", "1-0", "0-1", "1-1", "2-0", "0-2", "2-1", "1-2", "2-2", "3-1", "1-3", "3-0", "0-3"]
 
 
 def parsear_cuota(texto: str) -> float | None:
@@ -570,13 +574,52 @@ def _tau_dixon_coles(x: int, y: int, lam_x: float, lam_y: float, rho: float = -0
     return 1.0
 
 
-def probs_over_under_25(
+def _calibrar_empate_matriz(
+    matriz_bruta: dict[tuple[int, int], float],
+    cuota_empate: float | None,
+) -> dict[tuple[int, int], float]:
+    """
+    Si hay cuota de empate (X) válida, mezcla suavemente (25% de peso) la masa de empates
+    hacia la probabilidad implícita de empate para afinar marcadores como 0-0, 1-1 o 2-2.
+    """
+    total = sum(matriz_bruta.values())
+    if total <= 0:
+        return matriz_bruta
+
+    norm = {k: v / total for k, v in matriz_bruta.items()}
+    if not cuota_empate or cuota_empate <= 1.05:
+        return norm
+
+    prob_imp_empate = min(0.55, max(0.08, 1.0 / cuota_empate))
+    empates_keys = [k for k in norm if k[0] == k[1]]
+    no_empates_keys = [k for k in norm if k[0] != k[1]]
+
+    p_emp_actual = sum(norm[k] for k in empates_keys)
+    p_no_emp_actual = sum(norm[k] for k in no_empates_keys)
+
+    if p_emp_actual <= 0 or p_no_emp_actual <= 0:
+        return norm
+
+    p_emp_obj = (0.75 * p_emp_actual) + (0.25 * prob_imp_empate)
+    p_emp_obj = min(0.65, max(0.05, p_emp_obj))
+    p_no_emp_obj = 1.0 - p_emp_obj
+
+    esc_emp = p_emp_obj / p_emp_actual
+    esc_no_emp = p_no_emp_obj / p_no_emp_actual
+
+    ajustada: dict[tuple[int, int], float] = {}
+    for k, p in norm.items():
+        ajustada[k] = p * (esc_emp if k[0] == k[1] else esc_no_emp)
+    return ajustada
+
+
+def matriz_marcadores_dixon_coles(
     xg_local: float,
     xg_visitante: float,
     cuota_empate: float | None = None,
-    max_goles: int = 8,
-) -> dict[str, float]:
-    """Calcula P(-2.5), P(+2.5) y P(Empate) mediante matriz bivariante con ajuste Dixon-Coles."""
+    max_goles: int = 6,
+) -> dict[tuple[int, int], float]:
+    """Devuelve la distribución normalizada de marcadores exactos (i, j) con Dixon-Coles."""
     lam_l = max(0.05, xg_local)
     lam_v = max(0.05, xg_visitante)
     rho = _rho_ajustado_por_empate(cuota_empate)
@@ -584,31 +627,96 @@ def probs_over_under_25(
     probs_l = [poisson_pmf(i, lam_l) for i in range(max_goles + 1)]
     probs_v = [poisson_pmf(j, lam_v) for j in range(max_goles + 1)]
 
-    p_under_25_bruta = 0.0
-    p_empate_bruta = 0.0
-    p_total_matriz = 0.0
-
+    bruta: dict[tuple[int, int], float] = {}
     for i in range(max_goles + 1):
         for j in range(max_goles + 1):
             tau = _tau_dixon_coles(i, j, lam_l, lam_v, rho=rho)
-            p_ij = probs_l[i] * probs_v[j] * tau
-            p_total_matriz += p_ij
-            if i + j <= 2:
-                p_under_25_bruta += p_ij
-            if i == j:
-                p_empate_bruta += p_ij
+            bruta[(i, j)] = probs_l[i] * probs_v[j] * tau
 
-    denom = p_total_matriz if p_total_matriz > 0 else 1.0
-    p_under_25 = min(0.98, max(0.02, p_under_25_bruta / denom))
+    return _calibrar_empate_matriz(bruta, cuota_empate)
+
+
+def probs_over_under_25(
+    xg_local: float,
+    xg_visitante: float,
+    cuota_empate: float | None = None,
+    max_goles: int = 6,
+) -> dict[str, float]:
+    """Calcula P(-2.5), P(+2.5) y P(Empate) desde la matriz bivariante Dixon-Coles."""
+    matriz = matriz_marcadores_dixon_coles(
+        xg_local, xg_visitante, cuota_empate=cuota_empate, max_goles=max_goles
+    )
+    p_under_25_bruta = sum(p for (i, j), p in matriz.items() if i + j <= 2)
+    p_empate_bruta = sum(p for (i, j), p in matriz.items() if i == j)
+
+    p_under_25 = min(0.98, max(0.02, p_under_25_bruta))
     p_over_25 = 1.0 - p_under_25
-    p_empate = min(0.90, max(0.02, p_empate_bruta / denom))
+    p_empate = min(0.90, max(0.02, p_empate_bruta))
 
     return {
-        "xg_total": round(lam_l + lam_v, 2),
+        "xg_total": round(max(0.05, xg_local) + max(0.05, xg_visitante), 2),
         "p_under_25": p_under_25,
         "p_over_25": p_over_25,
         "p_empate": p_empate,
-        "rho": rho,
+        "rho": _rho_ajustado_por_empate(cuota_empate),
+    }
+
+
+def analizar_marcadores_exactos(
+    xg_local: float,
+    xg_visitante: float,
+    cuota_empate: float | None = None,
+    marcador_objetivo: str = "1-1",
+    cuota_marcador: float | None = None,
+) -> dict:
+    """Genera top marcadores exactos, marcadores clave y evaluación opcional de cuota exacta."""
+    matriz = matriz_marcadores_dixon_coles(
+        xg_local, xg_visitante, cuota_empate=cuota_empate, max_goles=6
+    )
+    ordenados = sorted(matriz.items(), key=lambda item: item[1], reverse=True)
+
+    top_6 = []
+    for (i, j), p in ordenados[:6]:
+        cuota_justa = (1.0 / p) if p > 0.005 else 99.0
+        top_6.append(
+            {
+                "Marcador": f"{i} - {j}",
+                "Prob. modelo": f"{p * 100:.1f}%",
+                "Cuota justa": f"{cuota_justa:.2f}",
+                "Tipo": "Empate" if i == j else ("-2.5" if i + j <= 2 else "+2.5"),
+            }
+        )
+
+    claves = [(0, 0), (1, 1), (1, 0), (0, 1), (2, 1), (1, 2)]
+    marcadores_clave = {
+        f"{i}-{j}": round(matriz.get((i, j), 0.0) * 100, 1) for i, j in claves
+    }
+
+    eval_objetivo = None
+    m_limpio = (marcador_objetivo or "").strip().replace(":", "-").replace(" ", "")
+    partes_m = m_limpio.split("-")
+    if len(partes_m) == 2 and partes_m[0].isdigit() and partes_m[1].isdigit():
+        gl, gv = int(partes_m[0]), int(partes_m[1])
+        p_obj = matriz.get((gl, gv), 0.0)
+        cuota_justa_obj = (1.0 / p_obj) if p_obj > 0.005 else 99.0
+        info_obj = {
+            "marcador": f"{gl}-{gv}",
+            "prob_modelo": round(p_obj * 100, 1),
+            "cuota_justa": round(cuota_justa_obj, 2),
+            "cuota_winamax": cuota_marcador,
+            "ventaja_pct": None,
+            "ev": None,
+        }
+        if cuota_marcador and cuota_marcador > 1.01:
+            imp = 1.0 / cuota_marcador
+            info_obj["ventaja_pct"] = round((p_obj - imp) * 100, 1)
+            info_obj["ev"] = round((p_obj * cuota_marcador) - 1.0, 3)
+        eval_objetivo = info_obj
+
+    return {
+        "top_6": top_6,
+        "marcadores_clave": marcadores_clave,
+        "eval_objetivo": eval_objetivo,
     }
 
 
@@ -742,9 +850,15 @@ def evaluar_entrada_25(
     }
 
 
-def renderizar_resultado(resultado: dict, partido_label: str) -> None:
-    """Muestra el veredicto directo (+2.5 goles, -2.5 goles o NO APOSTAR) y métricas."""
-    st.markdown(f"**Partido:** {partido_label}")
+def renderizar_resultado(
+    resultado: dict,
+    partido_label: str,
+    xg_l: float,
+    xg_v: float,
+    info_marcadores: dict,
+) -> None:
+    """Muestra el veredicto directo (+2.5 / -2.5 / NO APOSTAR), métricas y marcadores exactos."""
+    st.markdown(f"**Partido:** {partido_label}  |  **xG:** `{xg_l:.2f}` vs `{xg_v:.2f}`")
 
     r1, r2, r3, r4 = st.columns(4)
     r1.metric("Goles esperados (xG)", f"{resultado['xg_total']:.2f}")
@@ -765,6 +879,29 @@ def renderizar_resultado(resultado: dict, partido_label: str) -> None:
     if resultado.get("desglose"):
         st.dataframe(resultado["desglose"], width="stretch", hide_index=True)
 
+    st.markdown("#### 🎯 Marcadores exactos más probables (Dixon-Coles)")
+    claves = info_marcadores["marcadores_clave"]
+    k_cols = st.columns(6)
+    for idx, (m_label, p_val) in enumerate(claves.items()):
+        k_cols[idx].metric(f"Marc. {m_label}", f"{p_val:.1f}%")
+
+    st.dataframe(info_marcadores["top_6"], width="stretch", hide_index=True)
+
+    ev_obj = info_marcadores.get("eval_objetivo")
+    if ev_obj:
+        txt_obj = (
+            f"**Marcador consultado ({ev_obj['marcador']}):** "
+            f"Prob. modelo `{ev_obj['prob_modelo']:.1f}%` | "
+            f"Cuota justa `{ev_obj['cuota_justa']:.2f}`"
+        )
+        if ev_obj["cuota_winamax"] is not None and ev_obj["ventaja_pct"] is not None:
+            txt_obj += (
+                f" | Winamax `{ev_obj['cuota_winamax']:.2f}` | "
+                f"Ventaja `{ev_obj['ventaja_pct']:+.1f}%` | "
+                f"EV `{ev_obj['ev']:+.3f}`"
+            )
+        st.info(txt_obj)
+
 
 if "reset_nonce" not in st.session_state:
     st.session_state["reset_nonce"] = 0
@@ -783,6 +920,8 @@ CLAVES_DINAMICAS = {
     "cuota_over_25_txt",
     "cuota_under_25_txt",
     "cuota_empate_txt",
+    "marcador_objetivo",
+    "cuota_marcador_txt",
 }
 
 for clave, valor_ini in VALORES_POR_DEFECTO.items():
@@ -792,7 +931,7 @@ for clave, valor_ini in VALORES_POR_DEFECTO.items():
 
 
 def limpiar_todo_estado() -> None:
-    """Reinicia capturas, equipos, países, cuotas (en blanco), promedios y mensajes."""
+    """Reinicia capturas, equipos, países, cuotas (en blanco), marcadores y promedios."""
     st.session_state["reset_nonce"] = st.session_state.get("reset_nonce", 0) + 1
     nuevo_nonce = st.session_state["reset_nonce"]
     st.session_state["api_info_msg"] = ""
@@ -811,10 +950,12 @@ def limpiar_todo_estado() -> None:
     st.session_state[f"cuota_over_25_txt_{nuevo_nonce}"] = ""
     st.session_state[f"cuota_under_25_txt_{nuevo_nonce}"] = ""
     st.session_state[f"cuota_empate_txt_{nuevo_nonce}"] = ""
+    st.session_state[f"marcador_objetivo_{nuevo_nonce}"] = VALORES_POR_DEFECTO["marcador_objetivo"]
+    st.session_state[f"cuota_marcador_txt_{nuevo_nonce}"] = ""
 
 
 st.title("⚽ Detector de Goles (+2.5 / -2.5)")
-st.caption("Dixon-Coles + país libre y cuota empate (X), 2 capturas OCR, API-Football (v3) y cuotas Winamax.")
+st.caption("Dixon-Coles + marcadores exactos, país libre y cuota empate (X), 2 capturas OCR y Winamax.")
 
 st.subheader("1. Capturas de partido y últimos 10 partidos (opcional)")
 cap_col1, cap_col2 = st.columns(2)
@@ -1059,9 +1200,24 @@ with c_empate:
         key=f"cuota_empate_txt_{nonce}",
     )
 
+m_col1, m_col2 = st.columns(2)
+with m_col1:
+    marcador_objetivo = st.selectbox(
+        "Marcador exacto a consultar",
+        options=MARCADORES_COMUNES,
+        key=f"marcador_objetivo_{nonce}",
+    )
+with m_col2:
+    cuota_marcador_txt = st.text_input(
+        "Cuota marcador exacto (opcional)",
+        placeholder="Ej. 6,50",
+        key=f"cuota_marcador_txt_{nonce}",
+    )
+
 cuota_over_25 = parsear_cuota(cuota_over_txt)
 cuota_under_25 = parsear_cuota(cuota_under_txt)
 cuota_empate = parsear_cuota(cuota_empate_txt)
+cuota_marcador = parsear_cuota(cuota_marcador_txt)
 
 with st.expander("3. Promedios (últimos 10 partidos y H2H)"):
     m1, m2 = st.columns(2)
@@ -1133,6 +1289,14 @@ resultado_actual = evaluar_entrada_25(
     min_prob_under=min_prob_under_pct / 100.0,
 )
 
+info_marcadores = analizar_marcadores_exactos(
+    xg_local=xg_l,
+    xg_visitante=xg_v,
+    cuota_empate=cuota_x_activa,
+    marcador_objetivo=marcador_objetivo,
+    cuota_marcador=cuota_marcador,
+)
+
 label_loc = f"{equipo_local or 'Local'}{f' ({pais_local.strip()})' if pais_local.strip() else ''}"
 label_vis = f"{equipo_visitante or 'Visitante'}{f' ({pais_visitante.strip()})' if pais_visitante.strip() else ''}"
 partido_label = f"{label_loc} vs {label_vis}"
@@ -1140,4 +1304,4 @@ partido_label = f"{label_loc} vs {label_vis}"
 st.divider()
 st.subheader("4. Análisis del modelo")
 if st.button("Calcular recomendación", type="primary"):
-    renderizar_resultado(resultado_actual, partido_label)
+    renderizar_resultado(resultado_actual, partido_label, xg_l, xg_v, info_marcadores)
