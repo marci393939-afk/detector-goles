@@ -138,6 +138,22 @@ PALABRAS_RUIDO = {
     "MÁS SELECCIONES",
 }
 
+VALORES_POR_DEFECTO = {
+    "pais_local": "Otro / General",
+    "pais_visitante": "Otro / General",
+    "gf_local_10": 1.30,
+    "gc_local_10": 1.05,
+    "gf_vis_10": 1.15,
+    "gc_vis_10": 1.15,
+    "goles_h2h_prom": 2.30,
+    "usar_h2h": False,
+    "cuota_over_25_manual": 1.65,
+    "cuota_under_25_manual": 2.15,
+    "cuota_empate_manual": 3.20,
+    "api_info_msg": "",
+    "api_warn_msg": "",
+}
+
 
 def normalizar_texto(texto: str) -> str:
     sin_tildes = "".join(
@@ -457,11 +473,9 @@ def _rho_ajustado_por_empate(cuota_empate: float | None) -> float:
     if not cuota_empate or cuota_empate <= 1.05:
         return rho_base
     prob_imp_empate = 1.0 / cuota_empate
-    # Si la cuota de empate es baja (prob. implícita alta, p.ej. >= 28%), reforzamos ligeramente rho
     if prob_imp_empate >= 0.28:
         extra = min(0.08, (prob_imp_empate - 0.28) * 0.45)
         return round(max(-0.18, rho_base - extra), 3)
-    # Si el empate paga alto (prob. implícita <= 21%), suavizamos rho
     if prob_imp_empate <= 0.21:
         suave = min(0.05, (0.21 - prob_imp_empate) * 0.35)
         return round(min(-0.05, rho_base + suave), 3)
@@ -498,12 +512,10 @@ def calcular_xg_moderado(
     xg_local *= fac_pais_medio
     xg_visitante *= fac_pais_medio
 
-    # Si alguno de los dos equipos encaja poco en sus últimos 10 partidos, moderamos goles esperados
     if min(gc_l, gc_v) < 0.95:
         xg_local *= 0.93
         xg_visitante *= 0.93
 
-    # Si el empate tiene cuota baja (alta probabilidad implícita de partido cerrado), moderamos ligeramente
     if cuota_empate and cuota_empate > 1.05 and (1.0 / cuota_empate) >= 0.30:
         xg_local *= 0.96
         xg_visitante *= 0.96
@@ -728,23 +740,37 @@ def renderizar_resultado(resultado: dict, partido_label: str) -> None:
         st.dataframe(resultado["desglose"], width="stretch", hide_index=True)
 
 
-for clave, valor_ini in {
-    "pais_local": "Otro / General",
-    "pais_visitante": "Otro / General",
-    "gf_local_10": 1.30,
-    "gc_local_10": 1.05,
-    "gf_vis_10": 1.15,
-    "gc_vis_10": 1.15,
-    "goles_h2h_prom": 2.30,
-    "usar_h2h": False,
-    "cuota_over_25_manual": 1.65,
-    "cuota_under_25_manual": 2.15,
-    "cuota_empate_manual": 3.20,
-    "api_info_msg": "",
-    "api_warn_msg": "",
-}.items():
-    if clave not in st.session_state:
-        st.session_state[clave] = valor_ini
+if "reset_nonce" not in st.session_state:
+    st.session_state["reset_nonce"] = 0
+
+nonce = st.session_state["reset_nonce"]
+
+for clave, valor_ini in VALORES_POR_DEFECTO.items():
+    clave_dinamica = f"{clave}_{nonce}" if clave in {"pais_local", "pais_visitante", "gf_local_10", "gc_local_10", "gf_vis_10", "gc_vis_10", "goles_h2h_prom", "usar_h2h", "cuota_over_25_manual", "cuota_under_25_manual", "cuota_empate_manual"} else clave
+    if clave_dinamica not in st.session_state:
+        st.session_state[clave_dinamica] = valor_ini
+
+
+def limpiar_todo_estado() -> None:
+    """Reinicia equipos, países, cuotas, promedios y mensajes de estado."""
+    st.session_state["reset_nonce"] = st.session_state.get("reset_nonce", 0) + 1
+    nuevo_nonce = st.session_state["reset_nonce"]
+    st.session_state["api_info_msg"] = ""
+    st.session_state["api_warn_msg"] = ""
+    st.session_state["ultimo_auto_fetch"] = ""
+    st.session_state[f"equipo_local_input_{nuevo_nonce}"] = ""
+    st.session_state[f"equipo_visitante_input_{nuevo_nonce}"] = ""
+    st.session_state[f"pais_local_{nuevo_nonce}"] = VALORES_POR_DEFECTO["pais_local"]
+    st.session_state[f"pais_visitante_{nuevo_nonce}"] = VALORES_POR_DEFECTO["pais_visitante"]
+    st.session_state[f"gf_local_10_{nuevo_nonce}"] = VALORES_POR_DEFECTO["gf_local_10"]
+    st.session_state[f"gc_local_10_{nuevo_nonce}"] = VALORES_POR_DEFECTO["gc_local_10"]
+    st.session_state[f"gf_vis_10_{nuevo_nonce}"] = VALORES_POR_DEFECTO["gf_vis_10"]
+    st.session_state[f"gc_vis_10_{nuevo_nonce}"] = VALORES_POR_DEFECTO["gc_vis_10"]
+    st.session_state[f"goles_h2h_prom_{nuevo_nonce}"] = VALORES_POR_DEFECTO["goles_h2h_prom"]
+    st.session_state[f"usar_h2h_{nuevo_nonce}"] = VALORES_POR_DEFECTO["usar_h2h"]
+    st.session_state[f"cuota_over_25_manual_{nuevo_nonce}"] = VALORES_POR_DEFECTO["cuota_over_25_manual"]
+    st.session_state[f"cuota_under_25_manual_{nuevo_nonce}"] = VALORES_POR_DEFECTO["cuota_under_25_manual"]
+    st.session_state[f"cuota_empate_manual_{nuevo_nonce}"] = VALORES_POR_DEFECTO["cuota_empate_manual"]
 
 
 st.title("⚽ Detector de Goles (+2.5 / -2.5)")
@@ -754,6 +780,7 @@ st.subheader("1. Captura de partido (opcional)")
 archivo = st.file_uploader(
     "Sube una captura del partido para sugerir los equipos",
     type=["png", "jpg", "jpeg", "webp"],
+    key=f"uploader_{nonce}",
 )
 
 with st.expander("Ajustes de API-Football, OCR y filtros"):
@@ -817,21 +844,33 @@ if archivo is not None:
 st.subheader("2. Partido, país y cuotas manuales de Winamax")
 col1, col2 = st.columns(2)
 with col1:
-    equipo_local = st.text_input("Equipo Local", value=local_sugerido, key="equipo_local_input")
-    pais_local = st.selectbox("País Equipo Local", options=PAISES_DISPONIBLES, key="pais_local")
+    equipo_local = st.text_input(
+        "Equipo Local",
+        value=local_sugerido,
+        key=f"equipo_local_input_{nonce}",
+    )
+    pais_local = st.selectbox(
+        "País Equipo Local",
+        options=PAISES_DISPONIBLES,
+        key=f"pais_local_{nonce}",
+    )
 with col2:
     equipo_visitante = st.text_input(
-        "Equipo Visitante", value=visitante_sugerido, key="equipo_visitante_input"
+        "Equipo Visitante",
+        value=visitante_sugerido,
+        key=f"equipo_visitante_input_{nonce}",
     )
     pais_visitante = st.selectbox(
-        "País Equipo Visitante", options=PAISES_DISPONIBLES, key="pais_visitante"
+        "País Equipo Visitante",
+        options=PAISES_DISPONIBLES,
+        key=f"pais_visitante_{nonce}",
     )
 
 api_key_activa = obtener_api_key(api_key_input)
 
 
 def actualizar_estadisticas_desde_api(
-    loc: str, vis: str, key: str, p_loc: str, p_vis: str
+    loc: str, vis: str, key: str, p_loc: str, p_vis: str, cur_nonce: int
 ) -> None:
     st.session_state["api_info_msg"] = ""
     st.session_state["api_warn_msg"] = ""
@@ -866,18 +905,18 @@ def actualizar_estadisticas_desde_api(
             )
             return
 
-        st.session_state["gf_local_10"] = float(stats_l["gf_prom"])
-        st.session_state["gc_local_10"] = float(stats_l["gc_prom"])
-        st.session_state["gf_vis_10"] = float(stats_v["gf_prom"])
-        st.session_state["gc_vis_10"] = float(stats_v["gc_prom"])
+        st.session_state[f"gf_local_10_{cur_nonce}"] = float(stats_l["gf_prom"])
+        st.session_state[f"gc_local_10_{cur_nonce}"] = float(stats_l["gc_prom"])
+        st.session_state[f"gf_vis_10_{cur_nonce}"] = float(stats_v["gf_prom"])
+        st.session_state[f"gc_vis_10_{cur_nonce}"] = float(stats_v["gc_prom"])
 
         h2h = obtener_h2h_api(team_l["id"], team_v["id"], key)
         if h2h and h2h["partidos"] >= 2:
-            st.session_state["goles_h2h_prom"] = float(h2h["goles_prom"])
-            st.session_state["usar_h2h"] = True
+            st.session_state[f"goles_h2h_prom_{cur_nonce}"] = float(h2h["goles_prom"])
+            st.session_state[f"usar_h2h_{cur_nonce}"] = True
             h2h_txt = f" | H2H ({h2h['partidos']} partidos): {h2h['goles_prom']:.2f} goles/partido"
         else:
-            st.session_state["usar_h2h"] = False
+            st.session_state[f"usar_h2h_{cur_nonce}"] = False
             h2h_txt = " | H2H sin datos suficientes"
 
         st.session_state["api_info_msg"] = (
@@ -901,15 +940,19 @@ if (
     if st.session_state.get("ultimo_auto_fetch") != par_id:
         with st.spinner("Consultando últimos 10 partidos en API-Football..."):
             actualizar_estadisticas_desde_api(
-                equipo_local, equipo_visitante, api_key_activa, pais_local, pais_visitante
+                equipo_local, equipo_visitante, api_key_activa, pais_local, pais_visitante, nonce
             )
         st.session_state["ultimo_auto_fetch"] = par_id
 
-if st.button("🔄 Buscar promedios reales en API-Football"):
-    with st.spinner("Consultando últimos 10 partidos y H2H en API-Football..."):
-        actualizar_estadisticas_desde_api(
-            equipo_local, equipo_visitante, api_key_activa, pais_local, pais_visitante
-        )
+b_col1, b_col2 = st.columns([2, 1])
+with b_col1:
+    if st.button("🔄 Buscar promedios reales en API-Football"):
+        with st.spinner("Consultando últimos 10 partidos y H2H en API-Football..."):
+            actualizar_estadisticas_desde_api(
+                equipo_local, equipo_visitante, api_key_activa, pais_local, pais_visitante, nonce
+            )
+with b_col2:
+    st.button("🧹 Limpiar todo", on_click=limpiar_todo_estado)
 
 if st.session_state["api_info_msg"]:
     st.success(st.session_state["api_info_msg"])
@@ -926,7 +969,7 @@ with c_over:
         step=0.01,
         format="%.2f",
         disabled=not usar_over,
-        key="cuota_over_25_manual",
+        key=f"cuota_over_25_manual_{nonce}",
     )
 with c_under:
     usar_under = st.checkbox("Evaluar -2.5 goles", value=True)
@@ -937,7 +980,7 @@ with c_under:
         step=0.01,
         format="%.2f",
         disabled=not usar_under,
-        key="cuota_under_25_manual",
+        key=f"cuota_under_25_manual_{nonce}",
     )
 with c_empate:
     usar_empate_ref = st.checkbox("Usar cuota empate (X)", value=True)
@@ -948,7 +991,7 @@ with c_empate:
         step=0.01,
         format="%.2f",
         disabled=not usar_empate_ref,
-        key="cuota_empate_manual",
+        key=f"cuota_empate_manual_{nonce}",
     )
 
 st.subheader("3. Promedios (últimos 10 partidos y H2H)")
@@ -959,14 +1002,14 @@ with m1:
         min_value=0.0,
         max_value=6.0,
         step=0.05,
-        key="gf_local_10",
+        key=f"gf_local_10_{nonce}",
     )
     gc_local_10 = st.number_input(
         "Goles en contra Local (prom. 10)",
         min_value=0.0,
         max_value=6.0,
         step=0.05,
-        key="gc_local_10",
+        key=f"gc_local_10_{nonce}",
     )
 with m2:
     gf_vis_10 = st.number_input(
@@ -974,17 +1017,17 @@ with m2:
         min_value=0.0,
         max_value=6.0,
         step=0.05,
-        key="gf_vis_10",
+        key=f"gf_vis_10_{nonce}",
     )
     gc_vis_10 = st.number_input(
         "Goles en contra Visitante (prom. 10)",
         min_value=0.0,
         max_value=6.0,
         step=0.05,
-        key="gc_vis_10",
+        key=f"gc_vis_10_{nonce}",
     )
 
-usar_h2h = st.checkbox("Incluir promedio de goles en H2H", key="usar_h2h")
+usar_h2h = st.checkbox("Incluir promedio de goles en H2H", key=f"usar_h2h_{nonce}")
 goles_h2h_prom = None
 if usar_h2h:
     goles_h2h_prom = st.number_input(
@@ -992,7 +1035,7 @@ if usar_h2h:
         min_value=0.0,
         max_value=8.0,
         step=0.10,
-        key="goles_h2h_prom",
+        key=f"goles_h2h_prom_{nonce}",
     )
 
 cuota_x_activa = cuota_empate if usar_empate_ref else None
