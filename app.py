@@ -147,12 +147,24 @@ VALORES_POR_DEFECTO = {
     "gc_vis_10": 1.15,
     "goles_h2h_prom": 2.30,
     "usar_h2h": False,
-    "cuota_over_25_manual": 1.65,
-    "cuota_under_25_manual": 2.15,
-    "cuota_empate_manual": 3.20,
+    "cuota_over_25_txt": "",
+    "cuota_under_25_txt": "",
+    "cuota_empate_txt": "",
     "api_info_msg": "",
     "api_warn_msg": "",
 }
+
+
+def parsear_cuota(texto: str) -> float | None:
+    """Convierte texto de cuota (con coma o punto) a float válido (> 1.01), o None si está vacío."""
+    if not texto or not texto.strip():
+        return None
+    limpio = texto.strip().replace(",", ".")
+    try:
+        valor = float(limpio)
+        return valor if valor > 1.01 else None
+    except ValueError:
+        return None
 
 
 def normalizar_texto(texto: str) -> str:
@@ -689,9 +701,14 @@ def evaluar_entrada_25(
         )
 
     if not opciones:
+        motivo = (
+            "Introduce al menos una cuota válida de Winamax (+2.5 o -2.5) en la sección 2."
+            if not desglose
+            else "Ningún mercado supera los filtros de ventaja, probabilidad mínima o cuota mínima."
+        )
         return {
             "decision": "NO APOSTAR",
-            "motivo": "Ningún mercado supera los filtros de ventaja, probabilidad mínima o cuota mínima.",
+            "motivo": motivo,
             "xg_total": probs["xg_total"],
             "p_over_25": round(p_over * 100, 1),
             "p_under_25": round(p_under * 100, 1),
@@ -745,14 +762,28 @@ if "reset_nonce" not in st.session_state:
 
 nonce = st.session_state["reset_nonce"]
 
+CLAVES_DINAMICAS = {
+    "pais_local",
+    "pais_visitante",
+    "gf_local_10",
+    "gc_local_10",
+    "gf_vis_10",
+    "gc_vis_10",
+    "goles_h2h_prom",
+    "usar_h2h",
+    "cuota_over_25_txt",
+    "cuota_under_25_txt",
+    "cuota_empate_txt",
+}
+
 for clave, valor_ini in VALORES_POR_DEFECTO.items():
-    clave_dinamica = f"{clave}_{nonce}" if clave in {"pais_local", "pais_visitante", "gf_local_10", "gc_local_10", "gf_vis_10", "gc_vis_10", "goles_h2h_prom", "usar_h2h", "cuota_over_25_manual", "cuota_under_25_manual", "cuota_empate_manual"} else clave
-    if clave_dinamica not in st.session_state:
-        st.session_state[clave_dinamica] = valor_ini
+    clave_destino = f"{clave}_{nonce}" if clave in CLAVES_DINAMICAS else clave
+    if clave_destino not in st.session_state:
+        st.session_state[clave_destino] = valor_ini
 
 
 def limpiar_todo_estado() -> None:
-    """Reinicia equipos, países, cuotas, promedios y mensajes de estado."""
+    """Reinicia equipos, países, cuotas (en blanco), promedios y mensajes de estado."""
     st.session_state["reset_nonce"] = st.session_state.get("reset_nonce", 0) + 1
     nuevo_nonce = st.session_state["reset_nonce"]
     st.session_state["api_info_msg"] = ""
@@ -768,9 +799,9 @@ def limpiar_todo_estado() -> None:
     st.session_state[f"gc_vis_10_{nuevo_nonce}"] = VALORES_POR_DEFECTO["gc_vis_10"]
     st.session_state[f"goles_h2h_prom_{nuevo_nonce}"] = VALORES_POR_DEFECTO["goles_h2h_prom"]
     st.session_state[f"usar_h2h_{nuevo_nonce}"] = VALORES_POR_DEFECTO["usar_h2h"]
-    st.session_state[f"cuota_over_25_manual_{nuevo_nonce}"] = VALORES_POR_DEFECTO["cuota_over_25_manual"]
-    st.session_state[f"cuota_under_25_manual_{nuevo_nonce}"] = VALORES_POR_DEFECTO["cuota_under_25_manual"]
-    st.session_state[f"cuota_empate_manual_{nuevo_nonce}"] = VALORES_POR_DEFECTO["cuota_empate_manual"]
+    st.session_state[f"cuota_over_25_txt_{nuevo_nonce}"] = ""
+    st.session_state[f"cuota_under_25_txt_{nuevo_nonce}"] = ""
+    st.session_state[f"cuota_empate_txt_{nuevo_nonce}"] = ""
 
 
 st.title("⚽ Detector de Goles (+2.5 / -2.5)")
@@ -962,81 +993,76 @@ if st.session_state["api_warn_msg"]:
 c_over, c_under, c_empate = st.columns(3)
 with c_over:
     usar_over = st.checkbox("Evaluar +2.5 goles", value=True)
-    cuota_over_25 = st.number_input(
+    cuota_over_txt = st.text_input(
         "Cuota +2.5 (Winamax)",
-        min_value=1.01,
-        max_value=20.00,
-        step=0.01,
-        format="%.2f",
+        placeholder="Ej. 1,75",
         disabled=not usar_over,
-        key=f"cuota_over_25_manual_{nonce}",
+        key=f"cuota_over_25_txt_{nonce}",
     )
 with c_under:
     usar_under = st.checkbox("Evaluar -2.5 goles", value=True)
-    cuota_under_25 = st.number_input(
+    cuota_under_txt = st.text_input(
         "Cuota -2.5 (Winamax)",
-        min_value=1.01,
-        max_value=20.00,
-        step=0.01,
-        format="%.2f",
+        placeholder="Ej. 2,05",
         disabled=not usar_under,
-        key=f"cuota_under_25_manual_{nonce}",
+        key=f"cuota_under_25_txt_{nonce}",
     )
 with c_empate:
     usar_empate_ref = st.checkbox("Usar cuota empate (X)", value=True)
-    cuota_empate = st.number_input(
+    cuota_empate_txt = st.text_input(
         "Cuota Empate X (Winamax)",
-        min_value=1.05,
-        max_value=25.00,
-        step=0.01,
-        format="%.2f",
+        placeholder="Ej. 3,20",
         disabled=not usar_empate_ref,
-        key=f"cuota_empate_manual_{nonce}",
+        key=f"cuota_empate_txt_{nonce}",
     )
 
-st.subheader("3. Promedios (últimos 10 partidos y H2H)")
-m1, m2 = st.columns(2)
-with m1:
-    gf_local_10 = st.number_input(
-        "Goles a favor Local (prom. 10)",
-        min_value=0.0,
-        max_value=6.0,
-        step=0.05,
-        key=f"gf_local_10_{nonce}",
-    )
-    gc_local_10 = st.number_input(
-        "Goles en contra Local (prom. 10)",
-        min_value=0.0,
-        max_value=6.0,
-        step=0.05,
-        key=f"gc_local_10_{nonce}",
-    )
-with m2:
-    gf_vis_10 = st.number_input(
-        "Goles a favor Visitante (prom. 10)",
-        min_value=0.0,
-        max_value=6.0,
-        step=0.05,
-        key=f"gf_vis_10_{nonce}",
-    )
-    gc_vis_10 = st.number_input(
-        "Goles en contra Visitante (prom. 10)",
-        min_value=0.0,
-        max_value=6.0,
-        step=0.05,
-        key=f"gc_vis_10_{nonce}",
-    )
+cuota_over_25 = parsear_cuota(cuota_over_txt)
+cuota_under_25 = parsear_cuota(cuota_under_txt)
+cuota_empate = parsear_cuota(cuota_empate_txt)
 
-usar_h2h = st.checkbox("Incluir promedio de goles en H2H", key=f"usar_h2h_{nonce}")
-goles_h2h_prom = None
-if usar_h2h:
-    goles_h2h_prom = st.number_input(
-        "Promedio goles totales H2H",
-        min_value=0.0,
-        max_value=8.0,
-        step=0.10,
-        key=f"goles_h2h_prom_{nonce}",
-    )
+with st.expander("3. Promedios (últimos 10 partidos y H2H)"):
+    m1, m2 = st.columns(2)
+    with m1:
+        gf_local_10 = st.number_input(
+            "Goles a favor Local (prom. 10)",
+            min_value=0.0,
+            max_value=6.0,
+            step=0.05,
+            key=f"gf_local_10_{nonce}",
+        )
+        gc_local_10 = st.number_input(
+            "Goles en contra Local (prom. 10)",
+            min_value=0.0,
+            max_value=6.0,
+            step=0.05,
+            key=f"gc_local_10_{nonce}",
+        )
+    with m2:
+        gf_vis_10 = st.number_input(
+            "Goles a favor Visitante (prom. 10)",
+            min_value=0.0,
+            max_value=6.0,
+            step=0.05,
+            key=f"gf_vis_10_{nonce}",
+        )
+        gc_vis_10 = st.number_input(
+            "Goles en contra Visitante (prom. 10)",
+            min_value=0.0,
+            max_value=6.0,
+            step=0.05,
+            key=f"gc_vis_10_{nonce}",
+        )
+
+    usar_h2h = st.checkbox("Incluir promedio de goles en H2H", key=f"usar_h2h_{nonce}")
+    goles_h2h_prom = None
+    if usar_h2h:
+        goles_h2h_prom = st.number_input(
+            "Promedio goles totales H2H",
+            min_value=0.0,
+            max_value=8.0,
+            step=0.10,
+            key=f"goles_h2h_prom_{nonce}",
+        )
 
 cuota_x_activa = cuota_empate if usar_empate_ref else None
 
