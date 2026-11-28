@@ -17,7 +17,6 @@ st.set_page_config(
 
 API_BASE_URL = "https://v3.football.api-sports.io"
 
-# Factor de ajuste de goles esperados por país normalizado (1.00 = neutro)
 FACTOR_PAIS_NORM = {
     "espana": 0.98,
     "inglaterra": 1.03,
@@ -43,6 +42,7 @@ FACTOR_PAIS_NORM = {
     "australia": 1.03,
     "macedonia del norte": 0.97,
     "polonia": 1.00,
+    "singapur": 1.04,
     "otro / general": 1.00,
 }
 
@@ -162,7 +162,6 @@ VALORES_POR_DEFECTO = {
 
 
 def parsear_cuota(texto: str) -> float | None:
-    """Convierte texto de cuota (con coma o punto) a float válido (> 1.01), o None si está vacío."""
     if not texto or not texto.strip():
         return None
     limpio = texto.strip().replace(",", ".")
@@ -270,7 +269,7 @@ def buscar_equipo_api(nombre: str, api_key: str, pais_filtro: str | None = None)
 
 def obtener_promedios_10_api(team_id: int, api_key: str) -> dict | None:
     partidos: list[dict] = []
-    for temporada in ("2024", "2023", "2022"):
+    for temporada in ("2026", "2025", "2024", "2023", "2022"):
         data = api_get(
             "fixtures",
             (("team", str(team_id)), ("season", temporada), ("status", "FT")),
@@ -371,30 +370,83 @@ def obtener_h2h_api(team_local_id: int, team_vis_id: int, api_key: str) -> dict 
 
 
 def preparar_imagen_ocr(imagen: Image.Image) -> Image.Image:
-    """Mejora escala y contraste para facilitar la lectura de nombres de equipos."""
+    """Escala imágenes pequeñas (como capturas móviles o recortes) y mejora nitidez."""
     img = imagen.convert("RGB")
     w, h = img.size
-    if max(w, h) < 1600:
-        escala = 1600 / max(w, h)
+    if max(w, h) < 1800:
+        escala = 1800 / max(w, h)
         img = img.resize((int(w * escala), int(h * escala)), Image.Resampling.LANCZOS)
 
     gris = ImageOps.grayscale(img)
-    gris = ImageEnhance.Contrast(gris).enhance(1.5)
-    gris = ImageEnhance.Sharpness(gris).enhance(1.4)
+    gris = ImageEnhance.Contrast(gris).enhance(1.6)
+    gris = ImageEnhance.Sharpness(gris).enhance(1.5)
     return gris
 
 
 @st.cache_data(show_spinner=False)
 def ejecutar_ocr_bytes(img_bytes: bytes, psm: int = 6) -> str:
-    """Ejecuta Tesseract OCR sobre los bytes de la imagen."""
     imagen = Image.open(BytesIO(img_bytes))
     procesada = preparar_imagen_ocr(imagen)
     config = f"--oem 3 --psm {psm}"
     return pytesseract.image_to_string(procesada, lang="spa+eng", config=config)
 
 
+def extraer_resultados_captura(texto_ocr: str) -> dict:
+    """
+    Lee marcadores de partidos en el texto OCR (tanto formato 2-1/1:0 como goles sueltos
+    en líneas consecutivas de un mismo partido) y calcula % de +2.5 y -2.5 goles.
+    """
+    if not texto_ocr or not texto_ocr.strip():
+        return {"marcadores": [], "total": 0, "pct_over": None, "pct_under": None}
+
+    marcadores: list[tuple[int, int]] = []
+    goles_sueltos: list[int] = []
+
+    for linea in texto_ocr.splitlines():
+        l_limpia = linea.strip()
+        if not l_limpia:
+            continue
+        if re.search(r"\b\d{4}\b", l_limpia) or re.search(r"\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?", l_limpia):
+            continue
+        if re.search(r"\b(?:0?\d|1\d|2[0-3]):(?:00|15|30|45)\b", l_limpia):
+            continue
+
+        parejas = list(re.finditer(r"(?<![.,\d])(\d{1,2})\s*[-–:]\s*(\d{1,2})(?![.,\d])", l_limpia))
+        if parejas:
+            goles_sueltos.clear()
+            for m in parejas:
+                g1, g2 = int(m.group(1)), int(m.group(2))
+                if g1 <= 12 and g2 <= 12:
+                    marcadores.append((g1, g2))
+            continue
+
+        # Captura goles aislados al final de línea (ej. filas apiladas en tablas de últimos partidos)
+        m_solitario = re.search(r"(?:^|\s)(\d{1,2})$", l_limpia)
+        if m_solitario:
+            val = int(m_solitario.group(1))
+            if val <= 12:
+                goles_sueltos.append(val)
+                if len(goles_sueltos) == 2:
+                    marcadores.append((goles_sueltos[0], goles_sueltos[1]))
+                    goles_sueltos.clear()
+
+    total = len(marcadores)
+    if total == 0:
+        return {"marcadores": [], "total": 0, "pct_over": None, "pct_under": None}
+
+    over_count = sum(1 for g1, g2 in marcadores if (g1 + g2) > 2)
+    pct_over = round((over_count / total) * 100.0, 1)
+    pct_under = round(100.0 - pct_over, 1)
+
+    return {
+        "marcadores": [f"{g1}-{g2}" for g1, g2 in marcadores],
+        "total": total,
+        "pct_over": pct_over,
+        "pct_under": pct_under,
+    }
+
+
 def _es_token_basura_ocr(token: str) -> bool:
-    """Detecta tokens cortos deformados o repeticiones sin sentido."""
     limpio = re.sub(r"[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ]", "", token)
     if len(limpio) < 2:
         return True
@@ -406,7 +458,6 @@ def _es_token_basura_ocr(token: str) -> bool:
 
 
 def limpiar_lineas_ocr(texto_ocr: str) -> list[str]:
-    """Limpia el texto devuelto por Tesseract y descarta ruido de interfaz."""
     lineas_limpias = []
     for linea in texto_ocr.splitlines():
         limpia = linea.strip()
@@ -465,7 +516,6 @@ def _extraer_equipos_de_linea(linea: str) -> list[str]:
 
 
 def sugerir_equipos_candidatos(texto_ocr: str) -> tuple[str, str]:
-    """Sugiere equipo local y visitante priorizando líneas con cruce, marcador o 'vs'."""
     lineas = limpiar_lineas_ocr(texto_ocr)
     candidatos_cruce: list[str] = []
     equipos: list[str] = []
@@ -505,7 +555,6 @@ def sugerir_equipos_candidatos(texto_ocr: str) -> tuple[str, str]:
 
 
 def _rho_ajustado_por_empate(cuota_empate: float | None) -> float:
-    """Ajusta el parámetro rho de Dixon-Coles según la cuota de empate (X) en Winamax."""
     rho_base = -0.10
     if not cuota_empate or cuota_empate <= 1.05:
         return rho_base
@@ -528,12 +577,14 @@ def calcular_xg_moderado(
     pais_local: str = "",
     pais_visitante: str = "",
     cuota_empate: float | None = None,
+    pct_over_local: float | None = None,
+    pct_over_vis: float | None = None,
     peso_h2h: float = 0.12,
     factor_localia: float = 0.06,
 ) -> tuple[float, float]:
     """
     Calcula goles esperados moderando extremos, aplicando factor de localía,
-    factor por país de los equipos, freno ante defensas sólidas y ponderando H2H.
+    factor por país, tendencia real de % de partidos +2.5 de ambos equipos y H2H.
     """
     gf_l = min(max(gf_local_10, 0.15), 3.8)
     gc_l = min(max(gc_local_10, 0.15), 3.8)
@@ -548,6 +599,15 @@ def calcular_xg_moderado(
     fac_pais_medio = (fac_pais_l + fac_pais_v) / 2.0
     xg_local *= fac_pais_medio
     xg_visitante *= fac_pais_medio
+
+    # Ajusta suavemente según el % de partidos con +2.5 goles de ambos equipos
+    if pct_over_local is not None and pct_over_vis is not None:
+        pct_medio_over = (pct_over_local + pct_over_vis) / 2.0
+        # 50% es neutro; por encima empuja al alza, por debajo a la baja
+        ajuste_tendencia = 1.0 + ((pct_medio_over - 50.0) / 100.0) * 0.45
+        ajuste_tendencia = min(1.22, max(0.82, ajuste_tendencia))
+        xg_local *= ajuste_tendencia
+        xg_visitante *= ajuste_tendencia
 
     if min(gc_l, gc_v) < 0.95:
         xg_local *= 0.93
@@ -574,7 +634,6 @@ def poisson_pmf(k: int, lam: float) -> float:
 
 
 def _tau_dixon_coles(x: int, y: int, lam_x: float, lam_y: float, rho: float = -0.10) -> float:
-    """Ajuste de correlación Dixon-Coles para marcadores bajos (0-0, 1-0, 0-1, 1-1)."""
     if x == 0 and y == 0:
         return max(0.05, 1.0 - (lam_x * lam_y * rho))
     if x == 0 and y == 1:
@@ -590,7 +649,6 @@ def _calibrar_empate_matriz(
     matriz_bruta: dict[tuple[int, int], float],
     cuota_empate: float | None,
 ) -> dict[tuple[int, int], float]:
-    """Mezcla suavemente la masa de empates hacia la probabilidad implícita de X si existe."""
     total = sum(matriz_bruta.values())
     if total <= 0:
         return matriz_bruta
@@ -627,7 +685,6 @@ def matriz_marcadores_dixon_coles(
     cuota_empate: float | None = None,
     max_goles: int = 6,
 ) -> dict[tuple[int, int], float]:
-    """Devuelve la distribución normalizada de marcadores exactos (i, j) con Dixon-Coles."""
     lam_l = max(0.05, xg_local)
     lam_v = max(0.05, xg_visitante)
     rho = _rho_ajustado_por_empate(cuota_empate)
@@ -650,7 +707,6 @@ def probs_over_under_25(
     cuota_empate: float | None = None,
     max_goles: int = 6,
 ) -> dict[str, float]:
-    """Calcula P(-2.5), P(+2.5) y P(Empate) desde la matriz bivariante Dixon-Coles."""
     matriz = matriz_marcadores_dixon_coles(
         xg_local, xg_visitante, cuota_empate=cuota_empate, max_goles=max_goles
     )
@@ -675,7 +731,6 @@ def top_3_resultados_exactos(
     xg_visitante: float,
     cuota_empate: float | None = None,
 ) -> list[dict]:
-    """Devuelve únicamente los 3 resultados exactos más potentes del partido."""
     matriz = matriz_marcadores_dixon_coles(
         xg_local, xg_visitante, cuota_empate=cuota_empate, max_goles=6
     )
@@ -708,7 +763,6 @@ def evaluar_entrada_25(
     min_prob_over: float = 0.56,
     min_prob_under: float = 0.58,
 ) -> dict:
-    """Evalúa +2.5 y -2.5 goles exigiendo ventaja, cuota mínima y probabilidad mínima del modelo."""
     probs = probs_over_under_25(xg_local, xg_visitante, cuota_empate=cuota_empate)
     p_over = probs["p_over_25"]
     p_under = probs["p_under_25"]
@@ -833,9 +887,21 @@ def renderizar_resultado(
     xg_v: float,
     top_3: list[dict],
     pct_eq: dict[str, float],
+    ocr_res_1: dict,
+    ocr_res_2: dict,
 ) -> None:
-    """Muestra recomendación, % +2.5 / -2.5 de cada equipo y solo los 3 resultados exactos."""
     st.markdown(f"**Partido:** {partido_label}  |  **xG:** `{xg_l:.2f}` vs `{xg_v:.2f}`")
+
+    if ocr_res_1.get("total", 0) > 0:
+        st.info(
+            f"📷 **Lectura Captura 1 ({ocr_res_1['total']} resultados: {', '.join(ocr_res_1['marcadores'])}):** "
+            f"**{ocr_res_1['pct_over']:.0f}% de +2.5 goles** y **{ocr_res_1['pct_under']:.0f}% de -2.5 goles**"
+        )
+    if ocr_res_2.get("total", 0) > 0:
+        st.info(
+            f"📷 **Lectura Captura 2 ({ocr_res_2['total']} resultados: {', '.join(ocr_res_2['marcadores'])}):** "
+            f"**{ocr_res_2['pct_over']:.0f}% de +2.5 goles** y **{ocr_res_2['pct_under']:.0f}% de -2.5 goles**"
+        )
 
     r1, r2, r3, r4 = st.columns(4)
     r1.metric("Goles esperados (xG)", f"{resultado['xg_total']:.2f}")
@@ -905,12 +971,12 @@ for clave, valor_ini in VALORES_POR_DEFECTO.items():
 
 
 def limpiar_todo_estado() -> None:
-    """Reinicia capturas, equipos, países, cuotas (en blanco) y promedios/porcentajes."""
     st.session_state["reset_nonce"] = st.session_state.get("reset_nonce", 0) + 1
     nuevo_nonce = st.session_state["reset_nonce"]
     st.session_state["api_info_msg"] = ""
     st.session_state["api_warn_msg"] = ""
     st.session_state["ultimo_auto_fetch"] = ""
+    st.session_state["ultimo_ocr_pct_sync"] = ""
     st.session_state[f"equipo_local_input_{nuevo_nonce}"] = ""
     st.session_state[f"equipo_visitante_input_{nuevo_nonce}"] = ""
     st.session_state[f"pais_local_txt_{nuevo_nonce}"] = ""
@@ -931,7 +997,7 @@ def limpiar_todo_estado() -> None:
 
 
 st.title("⚽ Detector de Goles (+2.5 / -2.5)")
-st.caption("Dixon-Coles, 3 resultados exactos más potentes, % +2.5 / -2.5 por equipo, OCR y Winamax.")
+st.caption("Lectura OCR de resultados (% +2.5 / -2.5), 3 resultados exactos más potentes y Winamax.")
 
 st.subheader("1. Capturas de partido y últimos 10 partidos (opcional)")
 cap_col1, cap_col2 = st.columns(2)
@@ -983,6 +1049,8 @@ with st.expander("Ajustes de API-Football, OCR y filtros"):
 
 texto_ocr_1 = ""
 texto_ocr_2 = ""
+ocr_res_1: dict = {"marcadores": [], "total": 0, "pct_over": None, "pct_under": None}
+ocr_res_2: dict = {"marcadores": [], "total": 0, "pct_over": None, "pct_under": None}
 local_sugerido = ""
 visitante_sugerido = ""
 archivo_principal = archivo_local or archivo_visitante
@@ -999,6 +1067,7 @@ if archivo_local is not None or archivo_visitante is not None:
             )
             try:
                 texto_ocr_1 = ejecutar_ocr_bytes(archivo_local.getvalue(), psm=psm)
+                ocr_res_1 = extraer_resultados_captura(texto_ocr_1)
             except Exception as exc:
                 st.error(f"Error OCR en Captura 1: {exc}")
     with prev_cols[1]:
@@ -1011,11 +1080,33 @@ if archivo_local is not None or archivo_visitante is not None:
             )
             try:
                 texto_ocr_2 = ejecutar_ocr_bytes(archivo_visitante.getvalue(), psm=psm)
+                ocr_res_2 = extraer_resultados_captura(texto_ocr_2)
             except Exception as exc:
                 st.error(f"Error OCR en Captura 2: {exc}")
 
     if st.button("Reescanear capturas"):
         st.cache_data.clear()
+
+    if ocr_res_1.get("total", 0) > 0:
+        st.success(
+            f"Captura 1 ({ocr_res_1['total']} resultados detectados): "
+            f"**{ocr_res_1['pct_over']:.0f}% de +2.5 goles** y **{ocr_res_1['pct_under']:.0f}% de -2.5 goles**"
+        )
+    if ocr_res_2.get("total", 0) > 0:
+        st.success(
+            f"Captura 2 ({ocr_res_2['total']} resultados detectados): "
+            f"**{ocr_res_2['pct_over']:.0f}% de +2.5 goles** y **{ocr_res_2['pct_under']:.0f}% de -2.5 goles**"
+        )
+
+    firma_ocr = f"{nonce}_{texto_ocr_1}_{texto_ocr_2}"
+    if st.session_state.get("ultimo_ocr_pct_sync") != firma_ocr:
+        if ocr_res_1.get("total", 0) >= 3 and ocr_res_1.get("pct_over") is not None:
+            st.session_state[f"pct_over_local_10_{nonce}"] = float(ocr_res_1["pct_over"])
+            st.session_state[f"pct_under_local_10_{nonce}"] = float(ocr_res_1["pct_under"])
+        if ocr_res_2.get("total", 0) >= 3 and ocr_res_2.get("pct_over") is not None:
+            st.session_state[f"pct_over_vis_10_{nonce}"] = float(ocr_res_2["pct_over"])
+            st.session_state[f"pct_under_vis_10_{nonce}"] = float(ocr_res_2["pct_under"])
+        st.session_state["ultimo_ocr_pct_sync"] = firma_ocr
 
     texto_ocr_combinado = "\n".join(t for t in (texto_ocr_1, texto_ocr_2) if t.strip())
     local_sugerido, visitante_sugerido = sugerir_equipos_candidatos(texto_ocr_combinado)
@@ -1269,6 +1360,8 @@ xg_l, xg_v = calcular_xg_moderado(
     pais_local=pais_local,
     pais_visitante=pais_visitante,
     cuota_empate=cuota_x_activa,
+    pct_over_local=pct_over_local_10,
+    pct_over_vis=pct_over_vis_10,
 )
 
 resultado_actual = evaluar_entrada_25(
@@ -1304,4 +1397,6 @@ partido_label = f"{label_loc} vs {label_vis}"
 st.divider()
 st.subheader("4. Análisis del modelo")
 if st.button("Calcular recomendación", type="primary"):
-    renderizar_resultado(resultado_actual, partido_label, xg_l, xg_v, top_3, pct_eq)
+    renderizar_resultado(
+        resultado_actual, partido_label, xg_l, xg_v, top_3, pct_eq, ocr_res_1, ocr_res_2
+    )
