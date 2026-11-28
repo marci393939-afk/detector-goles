@@ -1,4 +1,7 @@
+import csv
+from datetime import datetime
 import math
+import os
 import re
 import unicodedata
 from io import BytesIO
@@ -16,6 +19,7 @@ st.set_page_config(
 )
 
 API_BASE_URL = "https://v3.football.api-sports.io"
+HISTORIAL_CSV = "historial_betdiary.csv"
 
 FACTOR_PAIS_NORM = {
     "espana": 0.98,
@@ -156,6 +160,7 @@ VALORES_POR_DEFECTO = {
     "cuota_over_25_txt": "",
     "cuota_under_25_txt": "",
     "cuota_empate_txt": "",
+    "stake_txt": "10",
     "api_info_msg": "",
     "api_warn_msg": "",
 }
@@ -170,6 +175,17 @@ def parsear_cuota(texto: str) -> float | None:
         return valor if valor > 1.01 else None
     except ValueError:
         return None
+
+
+def parsear_stake(texto: str, defecto: float = 10.0) -> float:
+    if not texto or not texto.strip():
+        return defecto
+    limpio = texto.strip().replace(",", ".")
+    try:
+        val = float(limpio)
+        return val if val > 0 else defecto
+    except ValueError:
+        return defecto
 
 
 def normalizar_texto(texto: str) -> str:
@@ -370,7 +386,6 @@ def obtener_h2h_api(team_local_id: int, team_vis_id: int, api_key: str) -> dict 
 
 
 def preparar_imagen_ocr(imagen: Image.Image) -> Image.Image:
-    """Escala imágenes pequeñas (como capturas móviles o recortes) y mejora nitidez."""
     img = imagen.convert("RGB")
     w, h = img.size
     if max(w, h) < 1800:
@@ -392,10 +407,6 @@ def ejecutar_ocr_bytes(img_bytes: bytes, psm: int = 6) -> str:
 
 
 def extraer_resultados_captura(texto_ocr: str) -> dict:
-    """
-    Lee marcadores de partidos en el texto OCR (tanto formato 2-1/1:0 como goles sueltos
-    en líneas consecutivas de un mismo partido) y calcula % de +2.5 y -2.5 goles.
-    """
     if not texto_ocr or not texto_ocr.strip():
         return {"marcadores": [], "total": 0, "pct_over": None, "pct_under": None}
 
@@ -420,7 +431,6 @@ def extraer_resultados_captura(texto_ocr: str) -> dict:
                     marcadores.append((g1, g2))
             continue
 
-        # Captura goles aislados al final de línea (ej. filas apiladas en tablas de últimos partidos)
         m_solitario = re.search(r"(?:^|\s)(\d{1,2})$", l_limpia)
         if m_solitario:
             val = int(m_solitario.group(1))
@@ -582,10 +592,6 @@ def calcular_xg_moderado(
     peso_h2h: float = 0.12,
     factor_localia: float = 0.06,
 ) -> tuple[float, float]:
-    """
-    Calcula goles esperados moderando extremos, aplicando factor de localía,
-    factor por país, tendencia real de % de partidos +2.5 de ambos equipos y H2H.
-    """
     gf_l = min(max(gf_local_10, 0.15), 3.8)
     gc_l = min(max(gc_local_10, 0.15), 3.8)
     gf_v = min(max(gf_vis_10, 0.15), 3.8)
@@ -600,10 +606,8 @@ def calcular_xg_moderado(
     xg_local *= fac_pais_medio
     xg_visitante *= fac_pais_medio
 
-    # Ajusta suavemente según el % de partidos con +2.5 goles de ambos equipos
     if pct_over_local is not None and pct_over_vis is not None:
         pct_medio_over = (pct_over_local + pct_over_vis) / 2.0
-        # 50% es neutro; por encima empuja al alza, por debajo a la baja
         ajuste_tendencia = 1.0 + ((pct_medio_over - 50.0) / 100.0) * 0.45
         ajuste_tendencia = min(1.22, max(0.82, ajuste_tendencia))
         xg_local *= ajuste_tendencia
@@ -880,6 +884,32 @@ def evaluar_entrada_25(
     }
 
 
+def guardar_apuesta_csv(fila: dict) -> str:
+    """Guarda el registro de apuesta en historial_betdiary.csv y devuelve el contenido CSV."""
+    columnas = [
+        "fecha",
+        "partido",
+        "seleccion",
+        "cuota",
+        "stake",
+        "beneficio_potencial",
+        "top_3_marcadores",
+        "bookie",
+    ]
+    archivo_existe = os.path.exists(HISTORIAL_CSV)
+    with open(HISTORIAL_CSV, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=columnas)
+        if not archivo_existe:
+            writer.writeheader()
+        writer.writerow(fila)
+
+    buf = BytesIO()
+    buf.write((",".join(columnas) + "\n").encode("utf-8"))
+    linea = ",".join(str(fila.get(c, "")).replace(",", ";") for c in columnas) + "\n"
+    buf.write(linea.encode("utf-8"))
+    return buf.getvalue().decode("utf-8")
+
+
 def renderizar_resultado(
     resultado: dict,
     partido_label: str,
@@ -889,6 +919,9 @@ def renderizar_resultado(
     pct_eq: dict[str, float],
     ocr_res_1: dict,
     ocr_res_2: dict,
+    cuota_over_25: float | None,
+    cuota_under_25: float | None,
+    stake_val: float,
 ) -> None:
     st.markdown(f"**Partido:** {partido_label}  |  **xG:** `{xg_l:.2f}` vs `{xg_v:.2f}`")
 
@@ -940,6 +973,53 @@ def renderizar_resultado(
     if resultado.get("desglose"):
         st.dataframe(resultado["desglose"], width="stretch", hide_index=True)
 
+    # Selección y cuota para registrar en Betdiary
+    if resultado["decision"] == "APOSTAR":
+        sel_def = resultado["mercado"]
+        cuota_def = float(resultado["cuota"])
+    else:
+        sel_def = "-2.5 goles" if resultado["p_under_25"] >= resultado["p_over_25"] else "+2.5 goles"
+        cuota_def = cuota_under_25 if (sel_def == "-2.5 goles" and cuota_under_25) else (cuota_over_25 or 2.00)
+
+    beneficio_pot = round(stake_val * (cuota_def - 1.0), 2)
+    top3_txt = " | ".join(f"{m['marcador']} ({m['prob']}%)" for m in top_3)
+
+    st.markdown("#### 📓 Registrar apuesta en Betdiary")
+    b_col1, b_col2 = st.columns([2, 1])
+    with b_col1:
+        if st.button("📌 Registrar apuesta en Betdiary", type="primary"):
+            fila = {
+                "fecha": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "partido": partido_label,
+                "seleccion": sel_def,
+                "cuota": f"{cuota_def:.2f}",
+                "stake": f"{stake_val:.2f}",
+                "beneficio_potencial": f"{beneficio_pot:.2f}",
+                "top_3_marcadores": top3_txt,
+                "bookie": "Winamax",
+            }
+            csv_str = guardar_apuesta_csv(fila)
+            st.session_state["ultimo_registro_betdiary"] = fila
+            st.session_state["ultimo_csv_betdiary"] = csv_str
+            st.success("Apuesta registrada en el historial local y preparada para Betdiary.")
+    with b_col2:
+        st.link_button("Abrir Betdiary.io ↗", "https://betdiary.io/dashboard/")
+
+    if "ultimo_registro_betdiary" in st.session_state:
+        reg = st.session_state["ultimo_registro_betdiary"]
+        st.code(
+            f"Partido: {reg['partido']} | Selección: {reg['seleccion']} | "
+            f"Cuota: {reg['cuota']} | Stake: {reg['stake']} | Ganancia est.: +{reg['beneficio_potencial']} | "
+            f"Top 3: {reg['top_3_marcadores']}",
+            language="text",
+        )
+        st.download_button(
+            "⬇️ Descargar CSV de esta apuesta",
+            data=st.session_state["ultimo_csv_betdiary"],
+            file_name="apuesta_betdiary.csv",
+            mime="text/csv",
+        )
+
 
 if "reset_nonce" not in st.session_state:
     st.session_state["reset_nonce"] = 0
@@ -962,6 +1042,7 @@ CLAVES_DINAMICAS = {
     "cuota_over_25_txt",
     "cuota_under_25_txt",
     "cuota_empate_txt",
+    "stake_txt",
 }
 
 for clave, valor_ini in VALORES_POR_DEFECTO.items():
@@ -994,10 +1075,11 @@ def limpiar_todo_estado() -> None:
     st.session_state[f"cuota_over_25_txt_{nuevo_nonce}"] = ""
     st.session_state[f"cuota_under_25_txt_{nuevo_nonce}"] = ""
     st.session_state[f"cuota_empate_txt_{nuevo_nonce}"] = ""
+    st.session_state[f"stake_txt_{nuevo_nonce}"] = VALORES_POR_DEFECTO["stake_txt"]
 
 
 st.title("⚽ Detector de Goles (+2.5 / -2.5)")
-st.caption("Lectura OCR de resultados (% +2.5 / -2.5), 3 resultados exactos más potentes y Winamax.")
+st.caption("Lectura OCR de resultados (% +2.5 / -2.5), 3 resultados exactos más potentes y registro para Betdiary.")
 
 st.subheader("1. Capturas de partido y últimos 10 partidos (opcional)")
 cap_col1, cap_col2 = st.columns(2)
@@ -1273,6 +1355,12 @@ with c_empate:
         key=f"cuota_empate_txt_{nonce}",
     )
 
+stake_txt = st.text_input(
+    "Importe / Stake (€ o unidades para Betdiary)",
+    key=f"stake_txt_{nonce}",
+)
+stake_val = parsear_stake(stake_txt, defecto=10.0)
+
 cuota_over_25 = parsear_cuota(cuota_over_txt)
 cuota_under_25 = parsear_cuota(cuota_under_txt)
 cuota_empate = parsear_cuota(cuota_empate_txt)
@@ -1398,5 +1486,15 @@ st.divider()
 st.subheader("4. Análisis del modelo")
 if st.button("Calcular recomendación", type="primary"):
     renderizar_resultado(
-        resultado_actual, partido_label, xg_l, xg_v, top_3, pct_eq, ocr_res_1, ocr_res_2
+        resultado_actual,
+        partido_label,
+        xg_l,
+        xg_v,
+        top_3,
+        pct_eq,
+        ocr_res_1,
+        ocr_res_2,
+        cuota_over_25 if usar_over else None,
+        cuota_under_25 if usar_under else None,
+        stake_val,
     )
